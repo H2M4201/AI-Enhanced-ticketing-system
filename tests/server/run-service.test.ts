@@ -195,6 +195,7 @@ describe("RunService", () => {
     const { db, user, fake, svc, run } = await reviewedRun();
 
     const review = await svc.getReview(run.id);
+    expect(review.status).toBe("review");
     expect(review.blockers).toEqual([]);
     expect(review.clarificationsPreview).toContain("## Clarifications");
 

@@ -168,7 +168,9 @@ export function RunFlow({ runId }: { runId: string }) {
       />
     );
   } else {
-    content = <ReviewScreen runId={runId} />;
+    content = (
+      <ReviewScreen runId={runId} siteUrl={project.siteUrl} onRunChanged={() => void reload().catch(() => undefined)} />
+    );
   }
 
   return (

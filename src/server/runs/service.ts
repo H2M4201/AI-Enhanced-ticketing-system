@@ -94,6 +94,8 @@ export type ChecksResult = {
 };
 
 export type ReviewView = {
+  /** The run's status: review, creating (a partial create failure) or done. */
+  status: Run["status"];
   /** The version to pass to editDraft. */
   draftVersion: number;
   items: DraftItem[];
@@ -370,6 +372,7 @@ export class RunService {
     const stored = await listQuestions(db, runId);
 
     return {
+      status: run.status,
       draftVersion: run.draftVersion,
       items,
       blockers: computeBlockers(items, requiredFields),
