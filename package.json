@@ -14,7 +14,9 @@
     "samples": "tsx scripts/build-samples.ts"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.84",
     "@electric-sql/pglite": "^0.5.15",
+    "ai": "^7.0.162",
     "drizzle-orm": "^0.45.4",
     "jszip": "^3.10.2",
     "mammoth": "^1.13.0",
