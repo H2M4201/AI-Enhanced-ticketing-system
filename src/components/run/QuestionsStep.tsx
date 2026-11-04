@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Spinner } from "@/components/run/Spinner";
 import type { QuestionView, RunStatus } from "@/components/run/types";
 import { card, errorText, inputClass, label, primaryButton, secondaryButton } from "@/components/styles";
-import { apiFetch, errorMessage } from "@/lib/api";
 import type { Resolution } from "@/core/domain";
+import { apiFetch, errorMessage } from "@/lib/api";
 
 /** How long the Answer box waits after the last keystroke before it saves. */
 const ANSWER_DEBOUNCE_MS = 600;
@@ -16,9 +16,12 @@ type Props = {
   questions: QuestionView[];
   /** What is running now, such as "Generating questions…". Null when idle. */
   busy: string | null;
-  onResolved: (questionId: string, resolution: Resolution) => void;
+  /** Null means the question is unresolved again (its Answer was cleared). */
+  onResolved: (questionId: string, resolution: Resolution | null) => void;
   onGenerateQuestions: () => void;
   onGenerateDraft: () => void;
+  onBackToInputs: () => void;
+  onRerunChecks: () => void;
 };
 
 async function saveResolution(runId: string, questionId: string, resolution: Resolution): Promise<void> {
@@ -31,62 +34,123 @@ async function saveResolution(runId: string, questionId: string, resolution: Res
 type CardProps = {
   runId: string;
   question: QuestionView;
-  onResolved: (questionId: string, resolution: Resolution) => void;
+  onResolved: (questionId: string, resolution: Resolution | null) => void;
+  onDirtyChange: (questionId: string, dirty: boolean) => void;
 };
 
-/** One question: its text and sources, the Answer box and the two other choices. Each choice saves as it changes. */
-function QuestionCard({ runId, question, onResolved }: CardProps) {
+/**
+ * One question: its text and sources, the Answer box and the two other choices.
+ * Saves for one question run one after another, so the last thing the user did is the last thing written.
+ */
+function QuestionCard({ runId, question, onResolved, onDirtyChange }: CardProps) {
   const savedAnswer = question.resolution?.kind === "answered" ? question.resolution.answer : "";
   const [text, setText] = useState(savedAnswer);
-  const [saving, setSaving] = useState(false);
+  const [timerPending, setTimerPending] = useState(false);
+  const [inFlight, setInFlight] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const lastSaved = useRef(savedAnswer);
+  const textRef = useRef(savedAnswer);
+  /** The answer the server holds, or "" when it holds a choice or nothing. Updated only inside queued work. */
+  const savedRef = useRef(savedAnswer);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chain = useRef<Promise<void>>(Promise.resolve());
+  const latest = useRef({ runId, question, onResolved });
 
-  useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
+  useEffect(() => {
+    latest.current = { runId, question, onResolved };
+  });
+
+  const dirty = timerPending || inFlight > 0;
+  useEffect(() => {
+    onDirtyChange(question.id, dirty);
+  }, [question.id, dirty, onDirtyChange]);
+
+  useEffect(() => {
+    const id = question.id;
+    return () => onDirtyChange(id, false);
+  }, [question.id, onDirtyChange]);
+
+  /** Queues work behind any save already running for this question. */
+  const enqueue = useCallback((work: () => Promise<void>) => {
+    setInFlight((count) => count + 1);
+    chain.current = chain.current.then(async () => {
+      try {
+        await work();
+        setError(null);
+      } catch (e) {
+        setError(errorMessage(e));
+      } finally {
+        setInFlight((count) => count - 1);
+      }
+    });
   }, []);
 
-  async function save(resolution: Resolution) {
-    setSaving(true);
-    setError(null);
-    try {
-      await saveResolution(runId, question.id, resolution);
-      if (resolution.kind === "answered") lastSaved.current = resolution.answer;
-      onResolved(question.id, resolution);
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setSaving(false);
-    }
-  }
+  const saveChoice = useCallback(
+    (resolution: Resolution) => {
+      enqueue(async () => {
+        const { runId: run, question: current, onResolved: report } = latest.current;
+        await saveResolution(run, current.id, resolution);
+        savedRef.current = "";
+        report(current.id, resolution);
+      });
+    },
+    [enqueue],
+  );
 
-  function cancelPending() {
-    if (timer.current) {
+  /** Saves the typed answer. A cleared answer is never sent: it makes the question unresolved here instead. */
+  const saveAnswer = useCallback(
+    (value: string) => {
+      const answer = value.trim();
+      enqueue(async () => {
+        const { runId: run, question: current, onResolved: report } = latest.current;
+        if (answer === "") {
+          if (savedRef.current === "") return;
+          savedRef.current = "";
+          report(current.id, null);
+          return;
+        }
+        if (answer === savedRef.current) return;
+        await saveResolution(run, current.id, { kind: "answered", answer });
+        savedRef.current = answer;
+        report(current.id, { kind: "answered", answer });
+      });
+    },
+    [enqueue],
+  );
+
+  const cancelPending = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    setTimerPending(false);
+  }, []);
+
+  // A pending answer is saved when the card goes away, so typing is never lost.
+  useEffect(
+    () => () => {
+      if (timer.current === null) return;
       clearTimeout(timer.current);
       timer.current = null;
-    }
-  }
-
-  /** Saves the typed answer when it is not empty and differs from what was last saved. */
-  function saveAnswer(value: string) {
-    const answer = value.trim();
-    if (answer === "" || answer === lastSaved.current) return;
-    void save({ kind: "answered", answer });
-  }
+      saveAnswer(textRef.current);
+    },
+    [saveAnswer],
+  );
 
   function changeAnswer(value: string) {
     setText(value);
-    cancelPending();
+    textRef.current = value;
+    if (timer.current) clearTimeout(timer.current);
+    setTimerPending(true);
     timer.current = setTimeout(() => {
       timer.current = null;
-      saveAnswer(value);
+      setTimerPending(false);
+      saveAnswer(textRef.current);
     }, ANSWER_DEBOUNCE_MS);
   }
 
   function blurAnswer() {
+    // Only text typed since the last save is sent. A choice made later keeps the text box as it is but is not overwritten.
+    if (timer.current === null) return;
     cancelPending();
-    saveAnswer(text);
+    saveAnswer(textRef.current);
   }
 
   const kind = question.resolution?.kind;
@@ -131,7 +195,7 @@ function QuestionCard({ runId, question, onResolved }: CardProps) {
           aria-pressed={kind === "out_of_scope"}
           onClick={() => {
             cancelPending();
-            void save({ kind: "out_of_scope" });
+            saveChoice({ kind: "out_of_scope" });
           }}
         >
           Out of scope
@@ -142,12 +206,12 @@ function QuestionCard({ runId, question, onResolved }: CardProps) {
           aria-pressed={kind === "judgment"}
           onClick={() => {
             cancelPending();
-            void save({ kind: "judgment" });
+            saveChoice({ kind: "judgment" });
           }}
         >
           Use your judgment
         </button>
-        {saving ? <Spinner label="Saving…" /> : null}
+        {inFlight > 0 ? <Spinner label="Saving…" /> : null}
       </div>
     </li>
   );
@@ -162,19 +226,34 @@ export function QuestionsStep({
   onResolved,
   onGenerateQuestions,
   onGenerateDraft,
+  onBackToInputs,
+  onRerunChecks,
 }: Props) {
+  const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  const onDirtyChange = useCallback(
+    (questionId: string, value: boolean) =>
+      setDirty((current) => (current[questionId] === value ? current : { ...current, [questionId]: value })),
+    [],
+  );
+  const anySaving = Object.values(dirty).some(Boolean);
   const answered = status === "questions";
   const allResolved = questions.every((question) => question.resolution !== null);
-  const canGenerateDraft = answered && allResolved && busy === null;
+  const canGenerateDraft = answered && allResolved && !anySaving && busy === null;
 
   return (
     <div className="flex flex-col gap-6">
       {status === "checked" ? (
         <div className={`${card} flex flex-col gap-3`}>
           <p className="text-sm text-neutral-700">The checks passed. Generate the clarifying questions for this epic.</p>
-          <div>
+          <div className="flex flex-wrap gap-2">
             <button type="button" className={primaryButton} onClick={onGenerateQuestions} disabled={busy !== null}>
               Generate questions
+            </button>
+            <button type="button" className={secondaryButton} onClick={onBackToInputs} disabled={busy !== null}>
+              Back to inputs
+            </button>
+            <button type="button" className={secondaryButton} onClick={onRerunChecks} disabled={busy !== null}>
+              Re-run checks
             </button>
           </div>
         </div>
@@ -187,7 +266,13 @@ export function QuestionsStep({
       {questions.length > 0 ? (
         <ul className="flex flex-col gap-4">
           {questions.map((question) => (
-            <QuestionCard key={question.id} runId={runId} question={question} onResolved={onResolved} />
+            <QuestionCard
+              key={question.id}
+              runId={runId}
+              question={question}
+              onResolved={onResolved}
+              onDirtyChange={onDirtyChange}
+            />
           ))}
         </ul>
       ) : null}
@@ -199,6 +284,7 @@ export function QuestionsStep({
         {answered && !allResolved ? (
           <p className="text-sm text-neutral-600">Answer, mark out of scope, or use your judgment for every question to continue.</p>
         ) : null}
+        {anySaving ? <Spinner label="Saving…" /> : null}
         {busy ? <Spinner label={busy} /> : null}
       </div>
     </div>

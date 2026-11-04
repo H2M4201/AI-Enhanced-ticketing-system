@@ -22,8 +22,8 @@ const HEAD = "bg-neutral-100 px-2 py-1.5 font-medium text-neutral-700";
 function list(items: string[], className: string) {
   return (
     <ul className={`${className} flex flex-col gap-1`}>
-      {items.map((item) => (
-        <li key={item}>{item}</li>
+      {items.map((item, index) => (
+        <li key={index}>{item}</li>
       ))}
     </ul>
   );
@@ -161,8 +161,8 @@ export function ChecksStep({ projectId, checks, busy, onRerun, onContinue, onBac
           <div role="alert" className={ERROR_BOX}>
             <p className="mb-2 font-medium">Names that need a fix in the routing file</p>
             <ul className="flex flex-col gap-2">
-              {roster.unresolved.map((entry) => (
-                <li key={`${entry.reason}-${entry.name}`}>
+              {roster.unresolved.map((entry, index) => (
+                <li key={index}>
                   <span className="font-medium">{entry.name}</span>:{" "}
                   {entry.reason === "ambiguous" ? "more than one user matches" : "no matching user"}
                   {entry.suggestions.length > 0 ? (

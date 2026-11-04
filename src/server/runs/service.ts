@@ -42,6 +42,7 @@ import {
   claimCreation,
   deleteDocument,
   getRun,
+  getRunDocument,
   insertDocument,
   insertRun,
   isCreationLocked,
@@ -355,8 +356,7 @@ export class RunService {
 
   /** One document's parsed sections, for the extracted-text view. Sections are null once the retention purge has removed them. */
   async getDocument(runId: string, docId: string) {
-    const document = (await listDocuments(this.deps.db, runId)).find((doc) => doc.id === docId);
-    if (!document) throw new NotFoundError("Document");
+    const document = await getRunDocument(this.deps.db, runId, docId);
     return { id: document.id, filename: document.filename, kind: document.kind, sections: document.sections };
   }
 

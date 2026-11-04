@@ -30,6 +30,8 @@ type Props = {
   busy: string | null;
   onRunChecks: () => void;
   onDocumentsChanged: () => Promise<void>;
+  /** Shown for a checked run, to return to its questions without running checks. */
+  onBackToQuestions?: () => void;
 };
 
 /** The run's inputs: the epic, its documents, the project's files and the provider. Nothing here is checked until Run checks. */
@@ -45,6 +47,7 @@ export function InputsStep({
   busy,
   onRunChecks,
   onDocumentsChanged,
+  onBackToQuestions,
 }: Props) {
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [docError, setDocError] = useState<string | null>(null);
@@ -204,6 +207,11 @@ export function InputsStep({
         <button type="button" className={primaryButton} onClick={onRunChecks} disabled={noProvider || busy !== null}>
           Run checks
         </button>
+        {onBackToQuestions ? (
+          <button type="button" className={secondaryButton} onClick={onBackToQuestions} disabled={busy !== null}>
+            Back to questions
+          </button>
+        ) : null}
         {busy ? <Spinner label={busy} /> : null}
       </div>
 

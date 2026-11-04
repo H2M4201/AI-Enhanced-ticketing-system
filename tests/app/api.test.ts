@@ -22,7 +22,7 @@ import type { Db } from "@/server/db/client";
 import { GET as getRunDetail } from "@/app/api/runs/[id]/route";
 import { POST as postChecks } from "@/app/api/runs/[id]/checks/route";
 import { PATCH as patchDraft } from "@/app/api/runs/[id]/draft/route";
-import { DELETE as deleteDocument } from "@/app/api/runs/[id]/documents/[docId]/route";
+import { DELETE as deleteDocument, GET as getDocument } from "@/app/api/runs/[id]/documents/[docId]/route";
 import { PUT as putQuestion } from "@/app/api/runs/[id]/questions/[qid]/route";
 import { POST as postProjectFile } from "@/app/api/projects/[id]/files/route";
 import { DELETE as deleteProjectFile } from "@/app/api/projects/[id]/files/[fileId]/route";
@@ -263,6 +263,48 @@ describe("route handlers", () => {
     vi.mocked(JiraCloudAdapter.prototype.canBrowseProject).mockResolvedValue(false);
 
     const response = await getRunDetail(new Request("http://localhost/api/runs/x"), ctx({ id: run.id }));
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe("forbidden");
+  });
+
+  it("returns one document's sections through its own run", async () => {
+    const { owner, project } = await setup();
+    const run = await insertRun(db, { projectId: project.id, createdBy: owner.id, epicText: "A", existingEpicKey: null, fileVersions: [], status: "inputs" });
+    const sections = [{ ref: "S1", heading: "Scope", text: "Checkout redesign" }];
+    const doc = await insertDocument(db, { runId: run.id, filename: "brief.md", kind: "md", sections, charCount: 17 });
+
+    const response = await getDocument(
+      new Request("http://localhost/api/runs/x/documents/y"),
+      ctx({ id: run.id, docId: doc.id }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ id: doc.id, filename: "brief.md", kind: "md", sections });
+  });
+
+  it("returns 404 when a document of another run is read through this run", async () => {
+    const { owner, project } = await setup();
+    const runA = await insertRun(db, { projectId: project.id, createdBy: owner.id, epicText: "A", existingEpicKey: null, fileVersions: [], status: "inputs" });
+    const runB = await insertRun(db, { projectId: project.id, createdBy: owner.id, epicText: "B", existingEpicKey: null, fileVersions: [], status: "inputs" });
+    const doc = await insertDocument(db, { runId: runB.id, filename: "notes.txt", kind: "txt", sections: [], charCount: 0 });
+
+    const response = await getDocument(
+      new Request("http://localhost/api/runs/x/documents/y"),
+      ctx({ id: runA.id, docId: doc.id }),
+    );
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.code).toBe("not_found");
+  });
+
+  it("returns 403 when the user cannot browse the project, even for a real document", async () => {
+    const { owner, project } = await setup();
+    const run = await insertRun(db, { projectId: project.id, createdBy: owner.id, epicText: "A", existingEpicKey: null, fileVersions: [], status: "inputs" });
+    const doc = await insertDocument(db, { runId: run.id, filename: "notes.txt", kind: "txt", sections: [], charCount: 0 });
+    vi.mocked(JiraCloudAdapter.prototype.canBrowseProject).mockResolvedValue(false);
+
+    const response = await getDocument(
+      new Request("http://localhost/api/runs/x/documents/y"),
+      ctx({ id: run.id, docId: doc.id }),
+    );
     expect(response.status).toBe(403);
     expect((await response.json()).error.code).toBe("forbidden");
   });

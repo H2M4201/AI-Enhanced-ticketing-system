@@ -23,6 +23,8 @@ export function RunFlow({ runId }: { runId: string }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [checks, setChecks] = useState<ChecksResult | null>(null);
   const [checksOpen, setChecksOpen] = useState(false);
+  /** A checked run can go back to its inputs to change documents. Inputs of an inputs run always show. */
+  const [inputsOpen, setInputsOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<Failure | null>(null);
 
@@ -73,6 +75,7 @@ export function RunFlow({ runId }: { runId: string }) {
       const result = await apiFetch<ChecksResult>(`/api/runs/${runId}/checks`, { method: "POST" });
       setChecks(result);
       setChecksOpen(true);
+      setInputsOpen(false);
       await reload();
     });
 
@@ -88,7 +91,7 @@ export function RunFlow({ runId }: { runId: string }) {
       await reload();
     });
 
-  function resolveQuestion(questionId: string, resolution: Resolution) {
+  function resolveQuestion(questionId: string, resolution: Resolution | null) {
     setDetail((current) =>
       current
         ? {
@@ -123,11 +126,17 @@ export function RunFlow({ runId }: { runId: string }) {
         checks={checks}
         busy={busy}
         onRerun={() => void runChecks()}
-        onContinue={() => setChecksOpen(false)}
-        onBack={() => setChecksOpen(false)}
+        onContinue={() => {
+          setChecksOpen(false);
+          setInputsOpen(false);
+        }}
+        onBack={() => {
+          setChecksOpen(false);
+          setInputsOpen(true);
+        }}
       />
     );
-  } else if (status === "inputs") {
+  } else if (status === "inputs" || (status === "checked" && inputsOpen)) {
     content = (
       <InputsStep
         projectId={project.id}
@@ -141,6 +150,7 @@ export function RunFlow({ runId }: { runId: string }) {
         busy={busy}
         onRunChecks={() => void runChecks()}
         onDocumentsChanged={reload}
+        onBackToQuestions={status === "checked" ? () => setInputsOpen(false) : undefined}
       />
     );
   } else if (status === "checked" || status === "questions") {
@@ -153,6 +163,8 @@ export function RunFlow({ runId }: { runId: string }) {
         onResolved={resolveQuestion}
         onGenerateQuestions={() => void generateQuestions()}
         onGenerateDraft={() => void generateDraft()}
+        onBackToInputs={() => setInputsOpen(true)}
+        onRerunChecks={() => void runChecks()}
       />
     );
   } else {

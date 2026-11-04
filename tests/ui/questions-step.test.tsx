@@ -6,6 +6,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QuestionsStep } from "@/components/run/QuestionsStep";
 import type { QuestionView } from "@/components/run/types";
+import type { Resolution } from "@/core/domain";
 import { ApiError, apiFetch } from "@/lib/api";
 
 vi.mock("@/lib/api", async (importOriginal) => ({
@@ -33,7 +34,17 @@ function question(id: string, rank: number, resolution: QuestionView["resolution
 }
 
 /** Holds the questions in state the way the run page does, so resolving one updates the step. */
-function Harness({ initial, status = "questions" }: { initial: QuestionView[]; status?: "checked" | "questions" }) {
+function Harness({
+  initial,
+  status = "questions",
+  onBackToInputs = () => undefined,
+  onRerunChecks = () => undefined,
+}: {
+  initial: QuestionView[];
+  status?: "checked" | "questions";
+  onBackToInputs?: () => void;
+  onRerunChecks?: () => void;
+}) {
   const [questions, setQuestions] = useState(initial);
   return (
     <QuestionsStep
@@ -41,11 +52,13 @@ function Harness({ initial, status = "questions" }: { initial: QuestionView[]; s
       status={status}
       questions={questions}
       busy={null}
-      onResolved={(id, resolution) =>
+      onResolved={(id: string, resolution: Resolution | null) =>
         setQuestions((current) => current.map((q) => (q.id === id ? { ...q, resolution } : q)))
       }
       onGenerateQuestions={() => undefined}
       onGenerateDraft={() => undefined}
+      onBackToInputs={onBackToInputs}
+      onRerunChecks={onRerunChecks}
     />
   );
 }
@@ -53,6 +66,8 @@ function Harness({ initial, status = "questions" }: { initial: QuestionView[]; s
 function draftButton() {
   return screen.getByRole("button", { name: /generate draft/i });
 }
+
+const PUT_Q1 = "/api/runs/run-1/questions/Q1";
 
 describe("QuestionsStep", () => {
   it("Generate draft is disabled until every question is resolved", async () => {
@@ -63,7 +78,8 @@ describe("QuestionsStep", () => {
     await user.click(screen.getAllByRole("button", { name: /out of scope/i })[0]);
     await user.click(screen.getAllByRole("button", { name: /use your judgment/i })[1]);
 
-    expect(draftButton()).toBeEnabled();
+    // Saves finish asynchronously, so the button enables once both choices have been written.
+    await waitFor(() => expect(draftButton()).toBeEnabled());
   });
 
   it("shows the empty state and an enabled Generate draft when there are no questions", () => {
@@ -82,7 +98,7 @@ describe("QuestionsStep", () => {
     const user = userEvent.setup();
     render(<Harness initial={[question("Q1", 1)]} />);
     await user.click(screen.getByRole("button", { name: /out of scope/i }));
-    expect(apiFetchMock).toHaveBeenCalledWith("/api/runs/run-1/questions/Q1", {
+    expect(apiFetchMock).toHaveBeenCalledWith(PUT_Q1, {
       method: "PUT",
       body: JSON.stringify({ kind: "out_of_scope" }),
     });
@@ -97,29 +113,86 @@ describe("QuestionsStep", () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
 
     await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(1), { timeout: 2000 });
-    expect(apiFetchMock).toHaveBeenCalledWith("/api/runs/run-1/questions/Q1", {
+    expect(apiFetchMock).toHaveBeenCalledWith(PUT_Q1, {
       method: "PUT",
       body: JSON.stringify({ kind: "answered", answer: "abc" }),
     });
   });
 
-  it("saves the Answer immediately on blur", () => {
+  it("saves the Answer immediately on blur", async () => {
     render(<Harness initial={[question("Q1", 1)]} />);
     const answer = screen.getByRole("textbox", { name: /answer/i });
     fireEvent.change(answer, { target: { value: "Use PostgreSQL" } });
     fireEvent.blur(answer);
-    expect(apiFetchMock).toHaveBeenCalledTimes(1);
-    expect(apiFetchMock).toHaveBeenCalledWith("/api/runs/run-1/questions/Q1", {
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(1));
+    expect(apiFetchMock).toHaveBeenCalledWith(PUT_Q1, {
       method: "PUT",
       body: JSON.stringify({ kind: "answered", answer: "Use PostgreSQL" }),
     });
   });
 
-  it("does not save an empty Answer", () => {
+  it("flushes a pending Answer when the card unmounts", async () => {
+    const { unmount } = render(<Harness initial={[question("Q1", 1)]} />);
+    fireEvent.change(screen.getByRole("textbox", { name: /answer/i }), { target: { value: "Keep me" } });
+    unmount();
+    await waitFor(() =>
+      expect(apiFetchMock).toHaveBeenCalledWith(PUT_Q1, {
+        method: "PUT",
+        body: JSON.stringify({ kind: "answered", answer: "Keep me" }),
+      }),
+    );
+  });
+
+  it("disables Generate draft while an Answer is pending or saving", async () => {
+    apiFetchMock.mockReturnValue(new Promise(() => undefined));
+    render(<Harness initial={[question("Q1", 1, { kind: "judgment" })]} />);
+    expect(draftButton()).toBeEnabled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: /answer/i }), { target: { value: "Typing" } });
+    expect(draftButton()).toBeDisabled();
+
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    expect(draftButton()).toBeDisabled();
+  });
+
+  it("ends with the choice when a choice is clicked while the Answer has focus", async () => {
+    const user = userEvent.setup();
     render(<Harness initial={[question("Q1", 1)]} />);
+    await user.click(screen.getByRole("textbox", { name: /answer/i }));
+    await user.keyboard("Use PostgreSQL");
+    await user.click(screen.getByRole("button", { name: /out of scope/i }));
+
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    const last = apiFetchMock.mock.calls.at(-1);
+    expect(last).toEqual([PUT_Q1, { method: "PUT", body: JSON.stringify({ kind: "out_of_scope" }) }]);
+  });
+
+  it("sends the choice only after the Answer save has finished, so the choice is written last", async () => {
+    let finishAnswer: () => void = () => undefined;
+    apiFetchMock.mockImplementationOnce(
+      () => new Promise((resolve) => (finishAnswer = () => resolve({ ok: true }))),
+    );
+    const user = userEvent.setup();
+    render(<Harness initial={[question("Q1", 1)]} />);
+    await user.click(screen.getByRole("textbox", { name: /answer/i }));
+    await user.keyboard("Use PostgreSQL");
+    await user.click(screen.getByRole("button", { name: /out of scope/i }));
+
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    finishAnswer();
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    expect(apiFetchMock.mock.calls[1]).toEqual([PUT_Q1, { method: "PUT", body: JSON.stringify({ kind: "out_of_scope" }) }]);
+  });
+
+  it("never sends an empty answer; clearing the Answer makes the question unresolved", async () => {
+    render(<Harness initial={[question("Q1", 1, { kind: "answered", answer: "Old" })]} />);
+    expect(draftButton()).toBeEnabled();
+
     const answer = screen.getByRole("textbox", { name: /answer/i });
-    fireEvent.change(answer, { target: { value: "   " } });
+    fireEvent.change(answer, { target: { value: "" } });
     fireEvent.blur(answer);
+
+    await waitFor(() => expect(draftButton()).toBeDisabled());
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
@@ -136,5 +209,16 @@ describe("QuestionsStep", () => {
     const card = screen.getByText("Question Q1?").closest("li") as HTMLElement;
     expect(within(card).getByText("ambiguity")).toBeInTheDocument();
     expect(within(card).getByText(/doc\.md#1/)).toBeInTheDocument();
+  });
+
+  it("offers Back to inputs and Re-run checks while the run is checked", async () => {
+    const user = userEvent.setup();
+    const onBackToInputs = vi.fn();
+    const onRerunChecks = vi.fn();
+    render(<Harness initial={[]} status="checked" onBackToInputs={onBackToInputs} onRerunChecks={onRerunChecks} />);
+    await user.click(screen.getByRole("button", { name: /back to inputs/i }));
+    await user.click(screen.getByRole("button", { name: /re-run checks/i }));
+    expect(onBackToInputs).toHaveBeenCalledTimes(1);
+    expect(onRerunChecks).toHaveBeenCalledTimes(1);
   });
 });

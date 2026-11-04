@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Spinner } from "@/components/run/Spinner";
 import { card, errorText, secondaryButton } from "@/components/styles";
 import { apiFetch, errorMessage } from "@/lib/api";
@@ -19,6 +19,16 @@ type Loaded = { sections: Section[] | null };
 export function ExtractedTextDialog({ runId, documentId, filename, onClose }: Props) {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Focus moves into the dialog when it opens, so keyboard users start inside it.
+  useEffect(() => {
+    dialogRef.current?.focus();
+  }, []);
+
+  function closeOnEscape(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") onClose();
+  }
 
   useEffect(() => {
     let current = true;
@@ -38,7 +48,15 @@ export function ExtractedTextDialog({ runId, documentId, filename, onClose }: Pr
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div role="dialog" aria-modal="true" aria-labelledby="extracted-title" className={`${card} flex max-h-[85vh] w-full max-w-3xl flex-col gap-4`}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="extracted-title"
+        tabIndex={-1}
+        onKeyDown={closeOnEscape}
+        className={`${card} flex max-h-[85vh] w-full max-w-3xl flex-col gap-4 focus:outline-none`}
+      >
         <div className="flex items-start justify-between gap-3">
           <h2 id="extracted-title" className="min-w-0 truncate text-lg font-semibold">
             Extracted text: {filename}

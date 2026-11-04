@@ -67,6 +67,16 @@ export async function listDocuments(db: Db, runId: string): Promise<DocumentRow[
   return db.select().from(runDocuments).where(eq(runDocuments.runId, runId)).orderBy(asc(runDocuments.filename));
 }
 
+/** One document of a run. Looked up by both ids, so a document of another run is not found. */
+export async function getRunDocument(db: Db, runId: string, docId: string): Promise<DocumentRow> {
+  const [row] = await db
+    .select()
+    .from(runDocuments)
+    .where(and(eq(runDocuments.id, docId), eq(runDocuments.runId, runId)));
+  if (!row) throw new NotFoundError("Document");
+  return row;
+}
+
 export async function deleteDocument(db: Db, runId: string, docId: string): Promise<void> {
   const deleted = await db
     .delete(runDocuments)
