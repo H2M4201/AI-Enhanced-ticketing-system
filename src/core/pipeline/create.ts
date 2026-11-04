@@ -84,7 +84,7 @@ function clarificationsPresent(description: string, clarificationsText: string):
 }
 
 /** Body, then acceptance criteria, sources and the marker footer, in that order. */
-function assembleDescription(item: DraftItem, body: string, acceptedByName: string): string {
+function assembleDescription(item: DraftItem, body: string, acceptedByName: string, estimateLine: string | null): string {
   const sections: string[] = [];
   if (isAcceptedSuggestion(item)) sections.push(`Proposed by AI and accepted by ${acceptedByName}.`);
   if (body !== "") sections.push(body);
@@ -92,6 +92,7 @@ function assembleDescription(item: DraftItem, body: string, acceptedByName: stri
     sections.push(`Acceptance criteria:\n${item.acceptanceCriteria.map((ac) => `- [ ] ${ac}`).join("\n")}`);
   }
   if (item.sourceRefs.length > 0) sections.push(`Sources: ${item.sourceRefs.join(", ")}`);
+  if (estimateLine !== null) sections.push(estimateLine);
   sections.push(markerFooter(item.id));
   return sections.join("\n\n");
 }
@@ -111,7 +112,7 @@ export async function createInTicketing(args: CreateArgs): Promise<CreateSummary
     );
   }
 
-  const blockers = computeBlockers(args.items, requiredFields);
+  const blockers = computeBlockers(args.items, requiredFields, { existingEpic: args.existingEpicKey !== null });
   if (blockers.length > 0) throw new CreateBlockedError(blockers);
 
   const label = runLabel(args.runId);
@@ -193,18 +194,31 @@ export async function createInTicketing(args: CreateArgs): Promise<CreateSummary
     }
   };
 
-  const issueFor = (item: DraftItem, typeId: string, body: string, parentKey: string | undefined): NewIssue => ({
-    clientRef: item.id,
-    projectKey: args.projectKey,
-    issueTypeId: typeId,
-    summary: item.title,
-    description: assembleDescription(item, body, args.acceptedByName),
-    parentKey,
-    assigneeAccountId: item.routing?.accountId ?? undefined,
-    labels: ["ai-backlog", label, ...(isAcceptedSuggestion(item) ? ["ai-suggested"] : [])],
-    componentIds: componentIdsFor(item, meta),
-    fieldValues: item.fieldValues,
-  });
+  const issueFor = (item: DraftItem, typeId: string, body: string, parentKey: string | undefined): NewIssue => {
+    // The estimate goes in the project's story-points field when it has one; otherwise it is written into the description.
+    const estimateKey = meta.issueTypes.find((t) => t.id === typeId)?.estimateFieldKey ?? null;
+    const fieldValues = { ...item.fieldValues };
+    let estimateLine: string | null = null;
+    if (item.estimate !== null) {
+      if (estimateKey !== null) {
+        if (fieldValues[estimateKey] === undefined) fieldValues[estimateKey] = item.estimate;
+      } else {
+        estimateLine = `Estimate: ${item.estimate} points`;
+      }
+    }
+    return {
+      clientRef: item.id,
+      projectKey: args.projectKey,
+      issueTypeId: typeId,
+      summary: item.title,
+      description: assembleDescription(item, body, args.acceptedByName, estimateLine),
+      parentKey,
+      assigneeAccountId: item.routing?.accountId ?? undefined,
+      labels: ["ai-backlog", label, ...(isAcceptedSuggestion(item) ? ["ai-suggested"] : [])],
+      componentIds: componentIdsFor(item, meta),
+      fieldValues,
+    };
+  };
 
   // Epic
   if (args.existingEpicKey !== null) {

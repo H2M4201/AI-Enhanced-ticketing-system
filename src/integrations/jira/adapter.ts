@@ -31,7 +31,13 @@ type JiraProject = {
   issueTypes: { id: string; name: string; hierarchyLevel: number }[];
 };
 
-type CreateMetaField = { fieldId: string; name: string; required: boolean; hasDefaultValue?: boolean };
+type CreateMetaField = {
+  fieldId: string;
+  name: string;
+  required: boolean;
+  hasDefaultValue?: boolean;
+  schema?: { type?: string };
+};
 type CreateMetaPage = { fields?: CreateMetaField[]; values?: CreateMetaField[]; total?: number };
 
 type JiraUser = { accountId: string; displayName: string; emailAddress?: string; accountType: string };
@@ -117,6 +123,23 @@ function mapBulkResponse(chunk: NewIssue[], res: BulkCreateResponse): CreateResu
   });
 }
 
+function requiredFieldsOf(fields: CreateMetaField[]): { key: string; name: string }[] {
+  const alwaysSet: readonly string[] = ALWAYS_SET_FIELDS;
+  return fields
+    .filter((f) => f.required && !f.hasDefaultValue && !alwaysSet.includes(f.fieldId))
+    .map((f) => ({ key: f.fieldId, name: f.name }));
+}
+
+const ESTIMATE_FIELD_NAMES = ["story point estimate", "story points"];
+
+/** The key of the story-points number field, matched by name, or null when the type has none. */
+function estimateFieldOf(fields: CreateMetaField[]): string | null {
+  const found = fields.find(
+    (f) => f.schema?.type === "number" && ESTIMATE_FIELD_NAMES.includes(f.name.trim().toLowerCase()),
+  );
+  return found?.fieldId ?? null;
+}
+
 function isNotFound(err: unknown): boolean {
   return err instanceof JiraError && err.status === 404;
 }
@@ -132,11 +155,13 @@ export class JiraCloudAdapter implements TicketingAdapter {
     const project = await this.http.request<JiraProject>("GET", `/rest/api/3/project/${enc(projectKey)}`);
     const issueTypes: IssueTypeMeta[] = [];
     for (const t of project.issueTypes) {
+      const fields = await this.createMetaFields(projectKey, t.id);
       issueTypes.push({
         id: t.id,
         name: t.name,
         level: levelOf(t.hierarchyLevel),
-        requiredFields: await this.requiredFields(projectKey, t.id),
+        requiredFields: requiredFieldsOf(fields),
+        estimateFieldKey: estimateFieldOf(fields),
       });
     }
     const links = await this.http.request<{ issueLinkTypes: { name: string }[] }>(
@@ -286,14 +311,6 @@ export class JiraCloudAdapter implements TicketingAdapter {
       }
     }
     return mapBulkResponse(chunk, res);
-  }
-
-  private async requiredFields(projectKey: string, issueTypeId: string): Promise<{ key: string; name: string }[]> {
-    const alwaysSet: readonly string[] = ALWAYS_SET_FIELDS;
-    const fields = await this.createMetaFields(projectKey, issueTypeId);
-    return fields
-      .filter((f) => f.required && !f.hasDefaultValue && !alwaysSet.includes(f.fieldId))
-      .map((f) => ({ key: f.fieldId, name: f.name }));
   }
 
   private async createMetaFields(projectKey: string, issueTypeId: string): Promise<CreateMetaField[]> {

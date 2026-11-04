@@ -157,6 +157,35 @@ describe("createInTicketing", () => {
     expect(fake.links).toHaveLength(0);
   });
 
+  it("sends the estimate in the story-points field when the project has one", async () => {
+    const items = sampleItems().map((i) => (i.id === "st1" ? { ...i, estimate: 5 } : i));
+    const { fake, run } = setup(items);
+    const meta: ProjectMeta = {
+      ...fake.projectMeta,
+      issueTypes: fake.projectMeta.issueTypes.map((t) =>
+        t.name === "Story" ? { ...t, estimateFieldKey: "customfield_10016" } : t,
+      ),
+    };
+    await run({ meta });
+
+    const story = issueNamed(fake, "Save card for later");
+    expect(story.fieldValues).toEqual({ customfield_10016: 5 });
+    expect(story.description).not.toContain("Estimate:");
+  });
+
+  it("writes the estimate into the description, before the marker, when there is no story-points field", async () => {
+    const items = sampleItems().map((i) => (i.id === "st1" ? { ...i, estimate: 3 } : i));
+    const { fake, run } = setup(items);
+    await run();
+
+    const story = issueNamed(fake, "Save card for later");
+    expect(story.fieldValues).toEqual({});
+    const lines = story.description.split("\n").filter((l) => l !== "");
+    expect(lines.at(-2)).toBe("Estimate: 3 points");
+    expect(readMarker(story.description)).toBe("st1");
+    expect(issueNamed(fake, "Payment timeout handling").description).not.toContain("Estimate:");
+  });
+
   it("labels accepted AI suggestions and prefixes the description", async () => {
     const { fake, run } = setup();
     await run();
@@ -267,6 +296,27 @@ describe("createInTicketing", () => {
     expect(epics).toHaveLength(1);
     expect(epics[0].description.split("## Clarifications")).toHaveLength(2);
     expect(db.clarificationsWritten).toBe(true);
+  });
+
+  it("does not require the epic's own fields when appending to an existing epic", async () => {
+    const { fake, run } = setup();
+    const seeded = await fake.createIssues([
+      {
+        clientRef: "x",
+        projectKey: "CHK",
+        issueTypeId: fake.projectMeta.issueTypes.find((t) => t.name === "Epic")!.id,
+        summary: "Existing epic",
+        description: "Old text.",
+        labels: [],
+      },
+    ]);
+    const key = (seeded[0] as { key: string }).key;
+    const requiredFields = { ...NO_FIELDS, epic: [{ key: "customfield_9", name: "Budget" }] };
+
+    const summary = await run({ existingEpicKey: key, requiredFields });
+
+    expect(summary.failed).toBe(0);
+    expect(fake.issues.filter((i) => i.issueTypeName === "Epic")).toHaveLength(1);
   });
 
   it("a link failure with an HTTP status keeps the task's key and reports the error", async () => {

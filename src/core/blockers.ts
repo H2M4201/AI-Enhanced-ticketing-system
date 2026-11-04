@@ -10,11 +10,13 @@ export type Blocker = {
 /**
  * Lists what stops the draft from being created in Jira. Only active items count,
  * and items that already have a Jira key are skipped. A required field counts as
- * missing when it is absent or null.
+ * missing when it is absent or null. With `existingEpic`, the epic is not created,
+ * so its required fields are not checked.
  */
 export function computeBlockers(
   items: DraftItem[],
   requiredFields: Record<ItemKind, { key: string; name: string }[]>,
+  opts: { existingEpic?: boolean } = {},
 ): Blocker[] {
   const blockers: Blocker[] = [];
   for (const item of activeItems(items)) {
@@ -36,6 +38,8 @@ export function computeBlockers(
         message: `"${item.title}" needs an assignee`,
       });
     }
+
+    if (opts.existingEpic === true && item.kind === "epic") continue;
 
     for (const field of requiredFields[item.kind]) {
       if (item.fieldValues[field.key] === undefined || item.fieldValues[field.key] === null) {

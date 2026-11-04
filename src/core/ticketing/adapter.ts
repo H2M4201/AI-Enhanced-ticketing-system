@@ -8,6 +8,8 @@ export type IssueTypeMeta = {
   level: IssueLevel;
   /** Excludes the fields the app always sets (see ALWAYS_SET_FIELDS). */
   requiredFields: { key: string; name: string }[];
+  /** The key of the number field that holds a story-point estimate on this type, when the project has one. */
+  estimateFieldKey?: string | null;
 };
 
 /** Fields the app always sets itself, so they never appear in requiredFields. */

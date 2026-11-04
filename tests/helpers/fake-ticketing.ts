@@ -22,6 +22,7 @@ export const ProjectMetaSchema: z.ZodType<ProjectMeta> = z.object({
       name: z.string(),
       level: z.enum(["epic", "standard", "subtask"]),
       requiredFields: z.array(z.object({ key: z.string(), name: z.string() })),
+      estimateFieldKey: z.string().nullable().optional(),
     }) satisfies z.ZodType<IssueTypeMeta>,
   ),
   components: z.array(z.object({ id: z.string(), name: z.string() })),
@@ -50,6 +51,7 @@ export type FakeIssue = {
   labels: string[];
   assigneeAccountId: string | null;
   componentIds: string[];
+  fieldValues: Record<string, unknown>;
 };
 
 export type FakeLink = { fromKey: string; toKey: string; linkType: string };
@@ -116,6 +118,7 @@ export class FakeTicketingAdapter implements TicketingAdapter {
         labels: [...issue.labels],
         assigneeAccountId: issue.assigneeAccountId ?? null,
         componentIds: [...(issue.componentIds ?? [])],
+        fieldValues: { ...issue.fieldValues },
       });
       if (this.failAfterCreate.has(issue.clientRef)) {
         throw new Error(`Simulated crash after creating ${key}`);

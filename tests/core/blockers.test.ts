@@ -113,4 +113,11 @@ describe("computeBlockers", () => {
     );
     expect(b).toEqual([]);
   });
+
+  it("skips the epic's required fields when the run targets an existing epic", () => {
+    const needsEpicField = { ...required, epic: [{ key: "customfield_9", name: "Budget" }] };
+    const items = [epic, mk({ id: "s", kind: "story", parentId: "e", routing: assigned, fieldValues: { customfield_1: "x" } })];
+    expect(computeBlockers(items, needsEpicField).map((b) => b.itemId)).toEqual(["e"]);
+    expect(computeBlockers(items, needsEpicField, { existingEpic: true })).toEqual([]);
+  });
 });

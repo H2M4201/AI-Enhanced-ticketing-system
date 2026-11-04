@@ -77,6 +77,8 @@ const storyFields = [
   { fieldId: "customfield_10020", name: "Team", required: true, hasDefaultValue: false },
   { fieldId: "priority", name: "Priority", required: true, hasDefaultValue: true },
   { fieldId: "customfield_10100", name: "Notes", required: false, hasDefaultValue: false },
+  { fieldId: "customfield_10016", name: "Story point estimate", required: false, schema: { type: "number" } },
+  { fieldId: "customfield_10200", name: "Story Points", required: false, schema: { type: "string" } },
 ];
 
 /** Routes shared by the metadata tests. */
@@ -104,6 +106,13 @@ describe("JiraCloudAdapter metadata", () => {
     ]);
     expect(m.components).toEqual([{ id: "20000", name: "Web" }]);
     expect(m.linkTypes).toEqual(["Blocks"]);
+  });
+
+  it("exposes the story-points number field by name, case-insensitively, and ignores non-number fields", async () => {
+    const { adapter } = setup(metaRoute);
+    const m = await adapter.getProjectMeta("CHK");
+    expect(m.issueTypes.find((t) => t.name === "Story")!.estimateFieldKey).toBe("customfield_10016");
+    expect(m.issueTypes.find((t) => t.name === "Epic")!.estimateFieldKey).toBeNull();
   });
 
   it("pages createmeta and accepts a values key", async () => {
