@@ -221,7 +221,7 @@ describe("createInTicketing", () => {
     await run({ clarificationsText: "" });
     expect(db.clarificationsWritten).toBe(false);
 
-    const clarifications = "Clarifications\n- Who pays shipping?";
+    const clarifications = "## Clarifications\n- Who pays shipping?";
     await run({ clarificationsText: clarifications });
     await run({ clarificationsText: clarifications });
 
@@ -230,14 +230,85 @@ describe("createInTicketing", () => {
     expect(db.clarificationsWritten).toBe(true);
   });
 
+  it("does not append again when the clarifications are already in the epic after a crash", async () => {
+    const { fake, db, run } = setup([mk({ id: "epic", kind: "epic", title: "Checkout Revamp", description: "One-page checkout." })]);
+    await run();
+    const epicKey = issueNamed(fake, "Checkout Revamp").key;
+
+    // The crash came after the append but before the flag was saved.
+    const clarifications = "## Clarifications\n- Who pays shipping?";
+    await fake.appendToDescription(epicKey, `\n${clarifications}`);
+    await run({ clarificationsText: clarifications });
+
+    const epic = issueNamed(fake, "Checkout Revamp");
+    expect(epic.description.split("## Clarifications")).toHaveLength(2);
+    expect(db.clarificationsWritten).toBe(true);
+  });
+
   it("writes clarifications into a newly created epic and marks them written", async () => {
     const { fake, db, run } = setup([mk({ id: "epic", kind: "epic", title: "Checkout Revamp", description: "One-page checkout." })]);
 
-    await run({ clarificationsText: "Clarifications\n- Who pays shipping?" });
+    await run({ clarificationsText: "## Clarifications\n- Who pays shipping?" });
 
     const epic = issueNamed(fake, "Checkout Revamp");
-    expect(epic.description).toBe(`One-page checkout.\n\nClarifications\n- Who pays shipping?\n\n${markerFooter("epic")}`);
+    expect(epic.description).toBe(`One-page checkout.\n\n## Clarifications\n- Who pays shipping?\n\n${markerFooter("epic")}`);
     expect(db.clarificationsWritten).toBe(true);
+  });
+
+  it("recovers an epic that crashed after creation without writing its clarifications twice", async () => {
+    const { fake, db, run } = setup([mk({ id: "epic", kind: "epic", title: "Checkout Revamp", description: "One-page checkout." })]);
+    const clarifications = "## Clarifications\n- Who pays shipping?";
+    fake.failAfterCreate.add("epic");
+
+    await expect(run({ clarificationsText: clarifications })).rejects.toThrow(/Simulated crash/);
+    await run({ clarificationsText: clarifications });
+
+    const epics = fake.issues.filter((i) => i.issueTypeName === "Epic");
+    expect(epics).toHaveLength(1);
+    expect(epics[0].description.split("## Clarifications")).toHaveLength(2);
+    expect(db.clarificationsWritten).toBe(true);
+  });
+
+  it("a link failure with an HTTP status keeps the task's key and reports the error", async () => {
+    const { fake, db, run } = setup();
+    const linkOf = fake.linkIssues.bind(fake);
+    fake.linkIssues = async (fromKey, toKey, linkType) => {
+      if (fake.issues.find((i) => i.key === fromKey)?.summary === "Hide save-card checkbox for guests") {
+        throw Object.assign(new Error("Link type not allowed"), { status: 400 });
+      }
+      return linkOf(fromKey, toKey, linkType);
+    };
+
+    const summary = await run({ structure: structureFor(fake.projectMeta, "Task") });
+
+    const failedTask = issueNamed(fake, "Hide save-card checkbox for guests");
+    expect(summary).toEqual({ created: 5, failed: 1, skipped: 0 });
+    expect(db.items.find((i) => i.id === "tk1")?.jiraKey).toBe(failedTask.key);
+    expect(db.errors.tk1).toBe(
+      `Created as ${failedTask.key} but linking to its story failed: Link type not allowed`,
+    );
+    expect(fake.links.map((l) => l.fromKey)).not.toContain(failedTask.key);
+    expect(fake.links.map((l) => l.fromKey)).toContain(issueNamed(fake, "QA: save a card").key);
+  });
+
+  it.each([
+    ["a network error", new Error("socket hang up")],
+    ["an auth error", Object.assign(new Error("Unauthorized"), { status: 401 })],
+  ])("rethrows %s from linking", async (_name, error) => {
+    const { fake, run } = setup();
+    fake.linkIssues = async () => {
+      throw error;
+    };
+
+    await expect(run({ structure: structureFor(fake.projectMeta, "Task") })).rejects.toBe(error);
+  });
+
+  it("throws on an epic key mismatch before doing anything", async () => {
+    const items = sampleItems().map((i) => (i.id === "epic" ? { ...i, jiraKey: "CHK-99" } : i));
+    const { fake, run } = setup(items);
+
+    await expect(run({ existingEpicKey: "CHK-1" })).rejects.toThrow(/Epic key mismatch/);
+    expect(fake.issues).toHaveLength(0);
   });
 
   it("standard-level tasks parent to the epic and link to their story", async () => {

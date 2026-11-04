@@ -54,10 +54,33 @@ type Pending = {
   issue: NewIssue;
   /** Set for standard-level tasks: the story to link the new task to. */
   link?: { toKey: string; linkType: string };
+  /** Runs after Jira created the issue, before its key is recorded. */
+  beforeRecorded?: () => Promise<void>;
 };
 
 function isAcceptedSuggestion(item: DraftItem): boolean {
   return item.origin === "ai_suggestion" && item.suggestionStatus === "accepted";
+}
+
+/**
+ * A link error is non-fatal when the adapter reports an HTTP status other than 401 or 403.
+ * Network errors (no status) and auth errors still abort the run.
+ */
+function isNonFatalLinkError(error: unknown): error is { status: number } {
+  if (typeof error !== "object" || error === null || !("status" in error)) return false;
+  const status = error.status;
+  return typeof status === "number" && status !== 401 && status !== 403;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Whether an epic description already holds the clarifications: the heading and first bullet. */
+function clarificationsPresent(description: string, clarificationsText: string): boolean {
+  const [heading, firstBullet] = clarificationsText.split("\n");
+  const probe = firstBullet === undefined ? heading : `${heading}\n${firstBullet}`;
+  return description.includes(probe);
 }
 
 /** Body, then acceptance criteria, sources and the marker footer, in that order. */
@@ -80,6 +103,13 @@ function assembleDescription(item: DraftItem, body: string, acceptedByName: stri
  */
 export async function createInTicketing(args: CreateArgs): Promise<CreateSummary> {
   const { adapter, meta, projectKey, structure, requiredFields } = args;
+
+  const draftEpic = args.items.find((item) => item.kind === "epic");
+  if (args.existingEpicKey !== null && draftEpic?.jiraKey != null && draftEpic.jiraKey !== args.existingEpicKey) {
+    throw new Error(
+      `Epic key mismatch: the draft epic is ${draftEpic.jiraKey} but the run expects ${args.existingEpicKey}`,
+    );
+  }
 
   const blockers = computeBlockers(args.items, requiredFields);
   if (blockers.length > 0) throw new CreateBlockedError(blockers);
@@ -136,11 +166,25 @@ export async function createInTicketing(args: CreateArgs): Promise<CreateSummary
       for (const pending of chunk) {
         const result = byRef.get(pending.item.id);
         if (result?.ok === true) {
-          keys.set(pending.item.id, result.key);
-          summary.created++;
-          await args.onItemCreated(pending.item.id, result.key);
-          if (pending.link) {
-            await adapter.linkIssues(result.key, pending.link.toKey, pending.link.linkType);
+          const { key } = result;
+          keys.set(pending.item.id, key);
+          if (pending.beforeRecorded) await pending.beforeRecorded();
+          await args.onItemCreated(pending.item.id, key);
+          if (!pending.link) {
+            summary.created++;
+            continue;
+          }
+          try {
+            await adapter.linkIssues(key, pending.link.toKey, pending.link.linkType);
+            summary.created++;
+          } catch (error) {
+            if (!isNonFatalLinkError(error)) throw error;
+            // The task exists under its key, so only the link is reported as failed.
+            summary.failed++;
+            await args.onItemFailed(
+              pending.item.id,
+              `Created as ${key} but linking to its story failed: ${messageOf(error)}`,
+            );
           }
         } else {
           await fail(pending.item, result?.ok === false ? result.error : "Jira returned no result");
@@ -166,16 +210,24 @@ export async function createInTicketing(args: CreateArgs): Promise<CreateSummary
   if (args.existingEpicKey !== null) {
     if (!keys.has(epic.id)) await recordExisting(epic, args.existingEpicKey);
     if (!clarificationsWritten && args.clarificationsText !== "") {
-      await adapter.appendToDescription(args.existingEpicKey, `\n${args.clarificationsText}`);
+      // A crash after the append but before the flag was saved leaves the text in place.
+      const current = await adapter.getIssue(args.existingEpicKey);
+      if (!current || !clarificationsPresent(current.description, args.clarificationsText)) {
+        await adapter.appendToDescription(args.existingEpicKey, `\n${args.clarificationsText}`);
+      }
       await markClarificationsWritten();
     }
   } else if (!keys.has(epic.id)) {
+    const writesClarifications = args.clarificationsText !== "" && !clarificationsWritten;
     const body =
       args.clarificationsText !== "" ? `${epic.description}\n\n${args.clarificationsText}` : epic.description;
-    await createBatch([{ item: epic, issue: issueFor(epic, structure.epic.id, body, undefined) }]);
-    if (keys.has(epic.id) && args.clarificationsText !== "" && !clarificationsWritten) {
-      await markClarificationsWritten();
-    }
+    await createBatch([
+      {
+        item: epic,
+        issue: issueFor(epic, structure.epic.id, body, undefined),
+        beforeRecorded: writesClarifications ? markClarificationsWritten : undefined,
+      },
+    ]);
   }
 
   // Stories, created before any task so the tasks can reference their keys.
