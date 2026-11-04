@@ -12,7 +12,7 @@ import {
   refresh,
   stateMatches,
 } from "@/server/auth/atlassian";
-import { getValidAccessToken, saveUser } from "@/server/auth/tokens";
+import { getUserById, getValidAccessToken, saveUser } from "@/server/auth/tokens";
 import type { Db } from "@/server/db/client";
 import { users } from "@/server/db/schema";
 import { ReauthRequiredError } from "@/server/errors";
@@ -226,6 +226,36 @@ describe("getValidAccessToken concurrency and forced refresh", () => {
 
     expect(await Promise.all([first, second])).toEqual(["new-access", "new-access"]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reuse a superseded refresh token when a stale read races a completed refresh", async () => {
+    const db = await testDb();
+    const user = await insertUser(db, new Date(Date.now() + 30_000));
+    const staleRow = await getUserById(db, user.id);
+    const sentRefreshTokens: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      sentRefreshTokens.push(JSON.parse(String(init.body)).refresh_token);
+      return json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    });
+    const opts = { fetchImpl: fetchImpl as unknown as typeof fetch };
+
+    // Caller A refreshes and stores the rotated tokens.
+    expect(await getValidAccessToken(db, user.id, opts)).toBe("new-access");
+
+    // Caller B's first read returns the row from before A's refresh.
+    let firstRead = true;
+    const staleDb = {
+      select: (...args: Parameters<Db["select"]>) => {
+        if (!firstRead) return db.select(...args);
+        firstRead = false;
+        return { from: () => ({ where: async () => [staleRow] }) };
+      },
+      update: (...args: Parameters<Db["update"]>) => db.update(...args),
+    } as unknown as Db;
+
+    expect(await getValidAccessToken(staleDb, user.id, opts)).toBe("new-access");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(sentRefreshTokens).toEqual(["old-refresh"]);
   });
 
   it("refreshes a valid token when forceRefresh is set", async () => {

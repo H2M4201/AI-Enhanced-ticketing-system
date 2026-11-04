@@ -69,9 +69,23 @@ export async function getValidAccessToken(db: Db, userId: string, opts: TokenOpt
   const pending = inFlight.get(userId);
   if (pending) return pending;
 
-  const refreshing = refreshAndStore(db, user, opts.fetchImpl).finally(() => inFlight.delete(userId));
+  const refreshing = refreshIfStillNeeded(db, userId, opts).finally(() => inFlight.delete(userId));
   inFlight.set(userId, refreshing);
   return refreshing;
+}
+
+/**
+ * Re-reads the row before refreshing. A caller that decided on a stale row, because another refresh
+ * finished in between, then uses the rotated tokens instead of sending a superseded refresh token.
+ */
+async function refreshIfStillNeeded(db: Db, userId: string, opts: TokenOptions): Promise<string> {
+  const now = opts.now ?? (() => new Date());
+  const user = await getUserById(db, userId);
+  const expiresSoon = user.accessTokenExpiresAt.getTime() - now().getTime() <= REFRESH_WINDOW_MS;
+  if (!opts.forceRefresh && !expiresSoon) {
+    return decryptSecret(user.accessTokenEnc);
+  }
+  return refreshAndStore(db, user, opts.fetchImpl);
 }
 
 async function refreshAndStore(db: Db, user: User, fetchImpl: typeof fetch | undefined): Promise<string> {
