@@ -8,8 +8,8 @@ export class DocumentParseError extends Error {
   readonly filename: string;
   readonly reason: string;
 
-  constructor(filename: string, reason: string) {
-    super(`${filename}: ${reason}`);
+  constructor(filename: string, reason: string, options?: { cause?: unknown }) {
+    super(`${filename}: ${reason}`, options);
     this.name = "DocumentParseError";
     this.filename = filename;
     this.reason = reason;
@@ -42,6 +42,20 @@ async function parseSections(kind: Kind, filename: string, bytes: Uint8Array): P
   }
 }
 
+/** Wraps low-level parser failures (corrupt or truncated binaries) so the error names the file. */
+async function parseSectionsOrExplain(kind: Kind, filename: string, bytes: Uint8Array): Promise<Section[]> {
+  try {
+    return await parseSections(kind, filename, bytes);
+  } catch (error) {
+    if (error instanceof DocumentParseError) throw error;
+    throw new DocumentParseError(
+      filename,
+      `could not read file — it may be corrupt or not a real ${kind} file`,
+      { cause: error },
+    );
+  }
+}
+
 /** Parses an uploaded document, choosing the parser by its case-insensitive extension. */
 export async function parseDocument(filename: string, bytes: Uint8Array): Promise<ParsedDocument> {
   const dot = filename.lastIndexOf(".");
@@ -51,7 +65,7 @@ export async function parseDocument(filename: string, bytes: Uint8Array): Promis
 
   if (bytes.byteLength === 0) throw new DocumentParseError(filename, "file is empty");
 
-  const sections = await parseSections(kind, filename, bytes);
+  const sections = await parseSectionsOrExplain(kind, filename, bytes);
   if (sections.every((section) => section.text.trim() === "")) {
     throw new DocumentParseError(
       filename,

@@ -25,12 +25,32 @@ describe("parseDocument", () => {
     const d = await parseDocument("requirements.docx", read("samples/checkout-revamp/requirements.docx"));
     expect(d.kind).toBe("docx");
     expect(d.sections.some((s) => s.ref === "requirements.docx §3.2" && /logged-in/i.test(s.text))).toBe(true);
+    const goals = d.sections.find((s) => s.ref === "requirements.docx §1");
+    expect(goals?.text).toMatch(/fast/i);
+    expect(d.sections.some((s) => s.ref === "requirements.docx §2.1")).toBe(true);
   });
 
   it("parses the sample pptx one section per slide", async () => {
     const d = await parseDocument("design.pptx", read("samples/checkout-revamp/design.pptx"));
     expect(d.kind).toBe("pptx");
     expect(d.sections.map((s) => s.ref)).toEqual([1, 2, 3, 4, 5].map((n) => `design.pptx slide ${n}`));
+    expect(d.sections[0].heading).toBe("Architecture");
+    expect(d.sections[0].text.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["bad.docx", "docx"],
+    ["bad.pptx", "pptx"],
+    ["bad.pdf", "pdf"],
+  ])("rejects random bytes named %s as an unreadable %s file", async (filename) => {
+    const junk = new Uint8Array(Array.from({ length: 512 }, (_, i) => (i * 97 + 13) % 256));
+    const error = await parseDocument(filename, junk).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(DocumentParseError);
+    expect((error as Error).message).toMatch(new RegExp(`${filename.replace(".", "\\.")}.*could not read file`));
+    expect((error as Error).cause).toBeDefined();
   });
 
   it("parses the sample pdf per page", async () => {
