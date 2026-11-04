@@ -24,6 +24,7 @@ const SAMPLE_DIR = new URL("../../samples/checkout-revamp/", import.meta.url);
 const sampleText = (name: string) => readFileSync(new URL(name, SAMPLE_DIR), "utf8");
 const sampleBytes = (name: string) => new Uint8Array(readFileSync(new URL(name, SAMPLE_DIR)));
 
+const TEST_USER = "test-user";
 const EPIC = "Replace the three-page checkout with a one-page checkout for guests and logged-in shoppers.";
 
 const STRUCTURE_REPLY = JSON.stringify({
@@ -157,9 +158,9 @@ function serviceWith(db: Db, llm: FakeLlm, fake: FakeTicketingAdapter, overrides
 }
 
 /** Applies an edit using the draft version the reviewer currently sees. */
-async function edit(svc: RunService, runId: string, op: Parameters<RunService["editDraft"]>[1]): Promise<DraftItem[]> {
+async function edit(svc: RunService, runId: string, op: Parameters<RunService["editDraft"]>[2]): Promise<DraftItem[]> {
   const { draftVersion } = await svc.getDraftState(runId);
-  return svc.editDraft(runId, op, draftVersion);
+  return svc.editDraft(TEST_USER, runId, op, draftVersion);
 }
 
 /** A run that has passed checks, answered its questions, generated and routed a draft, and cleared every blocker. */
@@ -174,7 +175,7 @@ async function reviewedRun() {
   await svc.runChecks(user.id, run.id);
   const questions = await svc.generateQuestions(run.id);
   for (const q of questions) await svc.resolveQuestion(run.id, q.id, { kind: "judgment" });
-  await svc.generateDraft(run.id);
+  await svc.generateDraft(TEST_USER, run.id);
 
   for (const blocker of (await svc.getReview(run.id, user.id)).blockers) {
     if (blocker.type === "pending_suggestion") {
@@ -221,7 +222,7 @@ describe("RunService", () => {
     await svc.runChecks(user.id, run.id);
     await svc.generateQuestions(run.id);
 
-    await expect(svc.generateDraft(run.id)).rejects.toBeInstanceOf(RunStateError);
+    await expect(svc.generateDraft(TEST_USER, run.id)).rejects.toBeInstanceOf(RunStateError);
     expect(llm.calls).toHaveLength(3);
   });
 
@@ -236,7 +237,7 @@ describe("RunService", () => {
     expect(await svc.generateQuestions(run.id)).toEqual([]);
     expect((await getRun(db, run.id)).status).toBe("questions");
 
-    await svc.generateDraft(run.id);
+    await svc.generateDraft(TEST_USER, run.id);
     expect((await getRun(db, run.id)).status).toBe("review");
   });
 
@@ -253,7 +254,7 @@ describe("RunService", () => {
 
     await purgeExpired(db, new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
 
-    await expect(svc.generateDraft(run.id)).rejects.toThrow(
+    await expect(svc.generateDraft(TEST_USER, run.id)).rejects.toThrow(
       "Documents were deleted by retention policy. Start a new breakdown.",
     );
     expect(llm.calls).toHaveLength(3);
@@ -367,7 +368,7 @@ describe("RunService", () => {
     expect(saved.createError).toBe("Linking failed");
 
     await db.update(runs).set({ status: "review" }).where(eq(runs.id, run.id));
-    await expect(svc.editDraft(run.id, { type: "delete", id: story.id }, 0)).rejects.toBeInstanceOf(RunStateError);
+    await expect(svc.editDraft(TEST_USER, run.id, { type: "delete", id: story.id }, 0)).rejects.toBeInstanceOf(RunStateError);
     expect(await loadDraft(db, run.id)).toHaveLength(2);
   });
 
@@ -380,7 +381,7 @@ describe("RunService", () => {
     await saveDraft(db, run.id, [epic, story]);
     await db.update(runs).set({ status: "review" }).where(eq(runs.id, run.id));
 
-    await expect(svc.editDraft(run.id, { type: "route", id: story.id, accountId: "acc-nobody" }, 0)).rejects.toBeInstanceOf(
+    await expect(svc.editDraft(TEST_USER, run.id, { type: "route", id: story.id, accountId: "acc-nobody" }, 0)).rejects.toBeInstanceOf(
       TreeError,
     );
   });
@@ -467,9 +468,9 @@ describe("RunService", () => {
     const { draftVersion, items } = await svc.getReview(run.id, user.id);
     const story = items.find((i) => i.kind === "story")!;
 
-    await svc.editDraft(run.id, { type: "update", id: story.id, patch: { title: "Tab A" } }, draftVersion);
+    await svc.editDraft(TEST_USER, run.id, { type: "update", id: story.id, patch: { title: "Tab A" } }, draftVersion);
     await expect(
-      svc.editDraft(run.id, { type: "update", id: story.id, patch: { title: "Tab B" } }, draftVersion),
+      svc.editDraft(TEST_USER, run.id, { type: "update", id: story.id, patch: { title: "Tab B" } }, draftVersion),
     ).rejects.toBeInstanceOf(RunStateError);
 
     expect(titled((await svc.getReview(run.id, user.id)).items, "Tab A").id).toBe(story.id);
@@ -749,6 +750,103 @@ describe("RunService", () => {
 
       expect(list.map((r) => r.id)).toEqual([newer.id, older.id]);
       expect(list[1]).toMatchObject({ status: "inputs", createdByName: "Linh Tran", epicFirstLine: "First epic" });
+    });
+  });
+
+  describe("guards against unrecorded Jira issues", () => {
+    /** A reviewed run whose first create attempt ended, as after a failure whose settle lookup missed the issues. */
+    async function afterAttempt() {
+      const ctx = await reviewedRun();
+      await ctx.db.update(runs).set({ lastCreateFinishedAt: new Date() }).where(eq(runs.id, ctx.run.id));
+      return ctx;
+    }
+    const seedIssue = (fake: FakeTicketingAdapter, runId: string) =>
+      fake.createIssues([
+        {
+          clientRef: "x",
+          projectKey: "CHK",
+          issueTypeId: fake.projectMeta.issueTypes[0].id,
+          summary: "Created earlier",
+          description: "ai-backlog-item: x",
+          labels: ["ai-backlog", `ai-run-${runId.slice(0, 8)}`],
+        },
+      ]);
+    const regenFixture = () => {
+      const llm = new FakeLlm([JSON.stringify(sampleDraftOutput), routeReply]);
+      return llm;
+    };
+
+    it("refuses Regenerate when Jira holds issues from the earlier attempt, and moves the run to creating", async () => {
+      const { db, user, fake, run } = await afterAttempt();
+      await seedIssue(fake, run.id);
+      const svc = serviceWith(db, regenFixture(), fake);
+
+      await expect(svc.generateDraft(user.id, run.id)).rejects.toThrow(
+        "Tickets from an earlier attempt exist in Jira. Use Retry.",
+      );
+      expect((await getRun(db, run.id)).status).toBe("creating");
+    });
+
+    it("regenerates when Jira holds nothing for the run", async () => {
+      const { db, user, fake, run } = await afterAttempt();
+      const svc = serviceWith(db, regenFixture(), fake);
+
+      expect((await svc.generateDraft(user.id, run.id)).length).toBeGreaterThan(0);
+      expect((await getRun(db, run.id)).status).toBe("review");
+    });
+
+    it("makes no Jira lookup for a first-time regenerate", async () => {
+      const { db, user, fake, run } = await reviewedRun();
+      const find = vi.spyOn(fake, "findIssuesByLabel");
+      const svc = serviceWith(db, regenFixture(), fake);
+
+      await svc.generateDraft(user.id, run.id);
+
+      expect(find).not.toHaveBeenCalled();
+    });
+
+    it("refuses and stays in review when the lookup fails", async () => {
+      const { db, user, fake, run } = await afterAttempt();
+      fake.findIssuesByLabel = async () => {
+        throw new TypeError("fetch failed");
+      };
+      const svc = serviceWith(db, regenFixture(), fake);
+
+      await expect(svc.generateDraft(user.id, run.id)).rejects.toThrow(
+        "Couldn't check Jira for tickets from the earlier attempt. Try again.",
+      );
+      expect((await getRun(db, run.id)).status).toBe("review");
+    });
+
+    it("applies the same check to a delete and to rejecting a suggestion, but only after an attempt", async () => {
+      const { db, user, fake, svc, run } = await afterAttempt();
+      const { items, draftVersion } = await svc.getReview(run.id, user.id);
+      const task = items.find((i) => i.kind === "task")!;
+      const suggestion = items.find((i) => i.origin === "ai_suggestion")!;
+      await seedIssue(fake, run.id);
+
+      await expect(svc.editDraft(user.id, run.id, { type: "delete", id: task.id }, draftVersion)).rejects.toThrow(
+        "Use Retry.",
+      );
+      expect((await getRun(db, run.id)).status).toBe("creating");
+
+      await db.update(runs).set({ status: "review" }).where(eq(runs.id, run.id));
+      await expect(
+        svc.editDraft(user.id, run.id, { type: "suggestion", id: suggestion.id, status: "rejected" }, draftVersion),
+      ).rejects.toThrow("Use Retry.");
+
+      // A plain edit does not look in Jira.
+      const find = vi.spyOn(fake, "findIssuesByLabel");
+      await db.update(runs).set({ status: "review" }).where(eq(runs.id, run.id));
+      await svc.editDraft(user.id, run.id, { type: "update", id: task.id, patch: { title: "T2" } }, draftVersion);
+      expect(find).not.toHaveBeenCalled();
+    });
+
+    it("refuses Regenerate once the documents were purged by retention", async () => {
+      const { db, user, svc, run } = await reviewedRun();
+      await purgeExpired(db, new Date(Date.now() + 30 * 24 * 3600 * 1000));
+
+      await expect(svc.generateDraft(user.id, run.id)).rejects.toThrow(/deleted by retention policy/i);
     });
   });
 });

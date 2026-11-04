@@ -4,11 +4,17 @@ import { JiraCloudAdapter } from "@/integrations/jira/adapter";
 import { JiraError, JiraHttp } from "@/integrations/jira/client";
 import { adfToText, textToAdf } from "@/integrations/jira/adf";
 
+type JsonBody = {
+  issueUpdates: { fields: { assignee?: { accountId?: string }; [field: string]: unknown } }[];
+  fields?: { description?: { type?: string; content?: unknown } };
+  [key: string]: unknown;
+};
+
 type Call = {
   method: string;
   path: string;
   query: URLSearchParams;
-  body: any;
+  body: JsonBody;
   auth: string | null;
 };
 type Reply = { status?: number; body?: unknown; raw?: string };
@@ -174,7 +180,7 @@ describe("JiraCloudAdapter issues", () => {
       if (c.method !== "POST" || c.path !== "/rest/api/3/issue/bulk") return undefined;
       const issues: unknown[] = [];
       const errors: unknown[] = [];
-      c.body.issueUpdates.forEach((u: any, i: number) => {
+      c.body.issueUpdates.forEach((u, i) => {
         if (u.fields.assignee?.accountId === "bad") {
           errors.push({
             status: 400,
@@ -334,8 +340,8 @@ describe("JiraCloudAdapter issues", () => {
     });
     await adapter.appendToDescription("CHK-1", "## Clarifications\n- Q1: guests?");
     const put = calls.find((c) => c.method === "PUT")!;
-    expect(put.body.fields.description.type).toBe("doc");
-    expect(put.body.fields.description.content).toEqual([
+    expect(put.body.fields?.description?.type).toBe("doc");
+    expect(put.body.fields?.description?.content).toEqual([
       ...existing.content,
       ...textToAdf("## Clarifications\n- Q1: guests?").content,
     ]);

@@ -297,11 +297,13 @@ export class RunService {
   }
 
   /** Builds the draft from the inputs and answers, then routes it. Refused while any question is unanswered. */
-  async generateDraft(runId: string): Promise<DraftItem[]> {
+  async generateDraft(userId: string, runId: string): Promise<DraftItem[]> {
     const { db } = this.deps;
     const run = await getRun(db, runId);
     assertStatus(run, ["questions", "review"], "The draft can be generated after the questions step");
     await touch(db, runId);
+    // A purged document refuses here, before any Jira or model call.
+    const documents = await loadDocuments(db, runId);
 
     const stored = await listQuestions(db, runId);
     const unresolved = stored.filter((entry) => entry.resolution === null).length;
@@ -312,8 +314,9 @@ export class RunService {
 
     const structure = requireStructure(run);
     const project = await getProject(db, run.projectId);
+    await this.assertNoEarlierIssues(userId, run, project);
     const llm = await this.deps.llmFor(project);
-    const inputs = pipelineInputs(run, await loadDocuments(db, runId), await loadRunFiles(db, run));
+    const inputs = pipelineInputs(run, documents, await loadRunFiles(db, run));
     const drafted = await generateDraftItems(llm, {
       inputs,
       questions: stored.map((entry) => entry.question),
@@ -336,7 +339,7 @@ export class RunService {
    * While tickets are being created, only route and update are allowed, on items without a Jira key,
    * and only when no creation holds the lock. expectedVersion must match the draft the caller saw.
    */
-  async editDraft(runId: string, op: DraftOp, expectedVersion: number): Promise<DraftItem[]> {
+  async editDraft(userId: string, runId: string, op: DraftOp, expectedVersion: number): Promise<DraftItem[]> {
     const { db } = this.deps;
     const run = await getRun(db, runId);
     assertStatus(run, ["review", "creating"], "The draft can only be edited while it is under review");
@@ -344,6 +347,8 @@ export class RunService {
     const users = run.assignableUsers ?? [];
 
     if (run.status === "review") {
+      const dropsItems = op.type === "delete" || (op.type === "suggestion" && op.status === "rejected");
+      if (dropsItems) await this.assertNoEarlierIssues(userId, run, await getProject(db, run.projectId));
       const next = applyDraftOp(await loadDraft(db, runId), op, users);
       await saveDraftVersioned(db, runId, expectedVersion, next);
       return next;
@@ -528,6 +533,28 @@ export class RunService {
       throw error;
     } finally {
       await this.releaseLock(runId);
+    }
+  }
+
+  /**
+   * After an earlier create attempt, Jira may hold issues the app never recorded (search lag can have put the
+   * run back in review). Removing or regenerating items would orphan them and the next Create would duplicate
+   * them, so those operations first look for the run label. Issues found send the run back to creating.
+   * A failed lookup refuses the operation. Does nothing when no create was ever attempted.
+   */
+  private async assertNoEarlierIssues(userId: string, run: Run, project: Project): Promise<void> {
+    if (run.lastCreateFinishedAt === null) return;
+    let found: number;
+    try {
+      const adapter = await this.deps.adapterFor(userId, project);
+      found = (await adapter.findIssuesByLabel(project.jiraProjectKey, runLabel(run.id))).length;
+    } catch (error) {
+      if (error instanceof ReauthRequiredError) throw error;
+      throw new RunStateError("Couldn't check Jira for tickets from the earlier attempt. Try again.");
+    }
+    if (found > 0) {
+      await updateRun(this.deps.db, run.id, { status: "creating" });
+      throw new RunStateError("Tickets from an earlier attempt exist in Jira. Use Retry.");
     }
   }
 

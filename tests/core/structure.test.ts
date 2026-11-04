@@ -76,7 +76,7 @@ describe("validateStructure", () => {
   it("errors on an unknown issue type with the available list", () => {
     const r = validateStructure({ ...plan, taskType: "Test" }, meta);
     expect(r.ok).toBe(false);
-    expect((r as any).errors[0]).toMatch(/"Test".*Available: Epic, Story, Task, Bug, Sub-task/);
+    expect((r.ok ? [] : r.errors)[0]).toMatch(/"Test".*Available: Epic, Story, Task, Bug, Sub-task/);
   });
 
   it("matches issue type names case-insensitively", () => {
@@ -98,13 +98,13 @@ describe("validateStructure", () => {
   it("errors when the epic type is not epic-level", () => {
     const r = validateStructure({ ...plan, epicType: "Story" }, meta);
     expect(r.ok).toBe(false);
-    expect((r as any).errors[0]).toMatch(/epic/i);
+    expect((r.ok ? [] : r.errors)[0]).toMatch(/epic/i);
   });
 
   it("errors when the story type is not standard-level", () => {
     const r = validateStructure({ ...plan, storyType: "Sub-task" }, meta);
     expect(r.ok).toBe(false);
-    expect((r as any).errors[0]).toMatch(/story role needs a standard-level/);
+    expect((r.ok ? [] : r.errors)[0]).toMatch(/story role needs a standard-level/);
   });
 
   it("errors when the task type is epic-level", () => {

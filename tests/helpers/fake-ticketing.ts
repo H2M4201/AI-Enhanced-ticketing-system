@@ -81,7 +81,8 @@ export class FakeTicketingAdapter implements TicketingAdapter {
     return this.projectMeta;
   }
 
-  async listAssignableUsers(_projectKey: string): Promise<AssignableUser[]> {
+  async listAssignableUsers(projectKey: string): Promise<AssignableUser[]> {
+    if (projectKey !== this.projectMeta.key) throw new Error(`Project ${projectKey} not found`);
     return [...this.users];
   }
 

@@ -27,7 +27,7 @@ export async function POST(_request: Request, { params }: Params) {
   return handle(async () => {
     const user = await requireUser();
     const { service, run } = await runFor((await params).id, user);
-    await service.generateDraft(run.id);
+    await service.generateDraft(user.id, run.id);
     return service.getReview(run.id, user.id);
   }, "runs.draft.generate");
 }
@@ -38,7 +38,7 @@ export async function PATCH(request: Request, { params }: Params) {
     const user = await requireUser();
     const { service, run } = await runFor((await params).id, user);
     const input = await readJson(request, EditDraftSchema);
-    await service.editDraft(run.id, input.op, input.expectedVersion);
+    await service.editDraft(user.id, run.id, input.op, input.expectedVersion);
     return service.getDraftState(run.id);
   }, "runs.draft.edit");
 }

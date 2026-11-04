@@ -41,7 +41,7 @@ export function TopBar(props: Props) {
   const primaryDisabled =
     props.busy ||
     (status === "review"
-      ? blocked || props.createCount === 0
+      ? blocked || props.createCount === 0 || props.retryWaitSeconds > 0
       : status === "creating"
         ? blocked || props.retryCount === 0 || props.retryWaitSeconds > 0
         : true);
