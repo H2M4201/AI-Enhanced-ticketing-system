@@ -1,0 +1,30 @@
+{
+  "projectMeta": {
+    "id": "10000",
+    "key": "CHK",
+    "name": "Checkout",
+    "issueTypes": [
+      { "id": "1", "name": "Epic", "level": "epic", "requiredFields": [] },
+      { "id": "2", "name": "Story", "level": "standard", "requiredFields": [] },
+      { "id": "3", "name": "Task", "level": "standard", "requiredFields": [] },
+      { "id": "4", "name": "Bug", "level": "standard", "requiredFields": [] },
+      { "id": "5", "name": "Sub-task", "level": "subtask", "requiredFields": [] }
+    ],
+    "components": [
+      { "id": "c1", "name": "Frontend" },
+      { "id": "c2", "name": "Backend" },
+      { "id": "c3", "name": "QA" },
+      { "id": "c4", "name": "Payments" }
+    ],
+    "linkTypes": ["Relates", "Blocks"]
+  },
+  "users": [
+    { "accountId": "acc-linh", "displayName": "Linh Tran", "email": "linh.tran@example.com" },
+    { "accountId": "acc-bao", "displayName": "Bao Le", "email": "bao.le@example.com" },
+    { "accountId": "acc-mai", "displayName": "Mai Pham", "email": "mai.pham@example.com" },
+    { "accountId": "acc-quang", "displayName": "Quang Vo", "email": "quang.vo@example.com" },
+    { "accountId": "acc-minh-nguyen", "displayName": "Minh Nguyen", "email": "minh.nguyen@example.com" },
+    { "accountId": "acc-minh-pham", "displayName": "Minh Pham", "email": "minh.pham@example.com" },
+    { "accountId": "acc-van-an", "displayName": "Nguyễn Văn An", "email": null }
+  ]
+}
