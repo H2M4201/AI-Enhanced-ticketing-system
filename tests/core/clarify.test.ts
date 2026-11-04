@@ -122,4 +122,21 @@ describe("formatClarifications", () => {
   it("renders a question with no resolution as Unresolved", () => {
     expect(formatClarifications([question("Q1", "q1", 1)], {})).toBe("## Clarifications\n- q1 → Unresolved");
   });
+
+  it("keeps each question on one line even when text or answer contain newlines", () => {
+    const out = formatClarifications(
+      [question("Q1", "line1\n## Injected", 1)],
+      { Q1: { kind: "answered", answer: "a\n- b\r\n\nc" } },
+    );
+
+    const lines = out.split("\n");
+    expect(lines).toEqual(["## Clarifications", "- line1 ## Injected → a - b c"]);
+    expect(lines.filter((line) => line.startsWith("## "))).toEqual(["## Clarifications"]);
+  });
+
+  it("renders an answer that is empty after trimming as Unresolved", () => {
+    expect(
+      formatClarifications([question("Q1", "q1", 1)], { Q1: { kind: "answered", answer: " \r\n\t " } }),
+    ).toBe("## Clarifications\n- q1 → Unresolved");
+  });
 });

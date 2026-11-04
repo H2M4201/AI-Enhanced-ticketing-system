@@ -90,11 +90,18 @@ export async function generateQuestions(llm: LlmClient, inputs: PipelineInputs):
   }));
 }
 
+/** Collapses every whitespace run, including line breaks, to one space, so the value stays on one line. */
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 function answerText(resolution: Resolution | undefined): string {
   if (!resolution) return "Unresolved";
   switch (resolution.kind) {
-    case "answered":
-      return resolution.answer;
+    case "answered": {
+      const answer = oneLine(resolution.answer);
+      return answer === "" ? "Unresolved" : answer;
+    }
     case "out_of_scope":
       return "Out of scope";
     case "judgment":
@@ -109,7 +116,7 @@ export function formatClarifications(
 ): string {
   const lines = questions.map((q) => {
     const resolution: Resolution | undefined = resolutions[q.id];
-    return `- ${q.text} → ${answerText(resolution)}`;
+    return `- ${oneLine(q.text)} → ${answerText(resolution)}`;
   });
   return ["## Clarifications", ...lines].join("\n");
 }
