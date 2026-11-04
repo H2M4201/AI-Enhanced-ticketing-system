@@ -39,6 +39,12 @@ describe("ExtractedTextDialog", () => {
     expect(screen.getByRole("dialog")).toHaveFocus();
   });
 
+  it("shows Deleted by retention policy when the sections were purged", async () => {
+    apiFetchMock.mockResolvedValue({ id: "doc-1", filename: "brief.md", kind: "md", sections: null });
+    render(<ExtractedTextDialog runId="run-1" documentId="doc-1" filename="brief.md" onClose={() => undefined} />);
+    expect(await screen.findByText("Deleted by retention policy")).toBeInTheDocument();
+  });
+
   it("closes on Escape", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

@@ -19,15 +19,13 @@ export type RunFiles = { guidelines: RunFile[]; routing: RunFile | null };
 
 export const EMPTY_ROSTER: Roster = { teams: [], people: [], rules: [] };
 
-/** Loads the run's documents with their parsed sections. Purged documents make the run unusable. */
+/** Loads the run's documents with their parsed sections. A purged document makes the run unusable, never empty text. */
 export async function loadDocuments(db: Db, runId: string): Promise<ParsedDocument[]> {
   const rows = await listDocuments(db, runId);
-  return rows.map((row) => {
-    if (row.sections === null) {
-      throw new RunStateError(`${row.filename} was removed by the retention policy and cannot be used`);
-    }
-    return ParsedDocumentSchema.parse({ filename: row.filename, kind: row.kind, sections: row.sections });
-  });
+  if (rows.some((row) => row.deletedAt !== null || row.sections === null)) {
+    throw new RunStateError("Documents were deleted by retention policy. Start a new breakdown.");
+  }
+  return rows.map((row) => ParsedDocumentSchema.parse({ filename: row.filename, kind: row.kind, sections: row.sections }));
 }
 
 /** Loads the files recorded on the run by id, so later uploads do not change an existing run. */

@@ -74,7 +74,7 @@ export function ExtractedTextDialog({ runId, documentId, filename, onClose }: Pr
           ) : null}
           {!error && loaded === null ? <Spinner label="Loading text…" /> : null}
           {loaded?.sections === null ? (
-            <p className="text-sm text-neutral-600">This document&apos;s text was removed by the retention policy.</p>
+            <p className="text-sm text-neutral-600">Deleted by retention policy</p>
           ) : null}
           {loaded?.sections?.map((section) => (
             <section key={section.ref} className="flex flex-col gap-1">
