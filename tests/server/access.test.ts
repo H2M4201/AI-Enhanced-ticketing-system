@@ -91,6 +91,32 @@ describe("canAccessProject", () => {
   });
 });
 
+describe("canAccessProject retry after 401", () => {
+  it("forces a token refresh on the retry after Jira answers 401", async () => {
+    const db = await testDb();
+    const { owner, project } = await setup(db);
+    // Jira accepts only the refreshed token; the stored token is still valid by its expiry time.
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://auth.atlassian.com/oauth/token")) {
+        return json({ access_token: "fresh", refresh_token: "fresh-refresh", expires_in: 3600 });
+      }
+      const auth = (init?.headers as Record<string, string>).Authorization;
+      if (auth !== "Bearer fresh") return json({ errorMessages: ["Unauthorized"] }, 401);
+      return json({ permissions: { BROWSE_PROJECTS: { havePermission: true } } });
+    });
+
+    const allowed = await canAccessProject(db, owner.id, project, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+    });
+
+    expect(allowed).toBe(true);
+    const tokenCalls = fetchImpl.mock.calls.filter(([u]) => String(u).startsWith("https://auth.atlassian.com/oauth/token"));
+    expect(tokenCalls).toHaveLength(1);
+  });
+});
+
 describe("assertProjectAccess", () => {
   it("throws ForbiddenError when the user cannot browse the project", async () => {
     const db = await testDb();

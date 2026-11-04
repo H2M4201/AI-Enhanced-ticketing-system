@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { exchangeCode, getMe, stateMatches } from "@/server/auth/atlassian";
+import { AtlassianApiError, exchangeCode, getMe, stateMatches } from "@/server/auth/atlassian";
 import { getSession } from "@/server/auth/session";
 import { saveUser } from "@/server/auth/tokens";
 import { getDb } from "@/server/db/client";
@@ -30,9 +30,12 @@ export async function GET(request: NextRequest) {
     const tokens = await exchangeCode(code);
     const me = await getMe(tokens.accessToken);
     session.userId = await saveUser(await getDb(), me, tokens);
-  } catch {
+  } catch (error) {
     await session.save();
-    safeLog("auth.callback_failed");
+    safeLog("auth.callback_failed", {
+      errorCode: error instanceof Error ? error.name : undefined,
+      httpStatus: error instanceof AtlassianApiError ? error.status : undefined,
+    });
     return NextResponse.redirect(appUrl("/", "?auth_error=1"));
   }
 

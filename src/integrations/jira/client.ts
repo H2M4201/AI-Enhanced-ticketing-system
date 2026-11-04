@@ -51,10 +51,15 @@ function parseJson(text: string): unknown {
 
 export class JiraHttp {
   private readonly base: string;
-  private readonly getToken: () => Promise<string>;
+  private readonly getToken: (opts?: { forceRefresh?: boolean }) => Promise<string>;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(opts: { cloudId: string; getToken: () => Promise<string>; fetchImpl?: typeof fetch }) {
+  constructor(opts: {
+    cloudId: string;
+    /** Called with forceRefresh: true when a 401 means the token must be replaced. */
+    getToken: (opts?: { forceRefresh?: boolean }) => Promise<string>;
+    fetchImpl?: typeof fetch;
+  }) {
     this.base = `${GATEWAY}/${opts.cloudId}`;
     this.getToken = opts.getToken;
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -65,7 +70,7 @@ export class JiraHttp {
     let res = await this.send(method, path, body, await this.getToken());
     if (res.status === 401) {
       await res.text();
-      res = await this.send(method, path, body, await this.getToken());
+      res = await this.send(method, path, body, await this.getToken({ forceRefresh: true }));
     }
     const text = await res.text();
     const parsed = text ? parseJson(text) : undefined;

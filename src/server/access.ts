@@ -35,7 +35,12 @@ export async function canAccessProject(
 
   const http = new JiraHttp({
     cloudId: project.cloudId,
-    getToken: () => getValidAccessToken(db, userId, { fetchImpl: opts.fetchImpl, now: opts.now }),
+    getToken: (tokenOpts) =>
+      getValidAccessToken(db, userId, {
+        fetchImpl: opts.fetchImpl,
+        now: opts.now,
+        forceRefresh: tokenOpts?.forceRefresh,
+      }),
     fetchImpl: opts.fetchImpl,
   });
   const allowed = await new JiraCloudAdapter(http).canBrowseProject(project.jiraProjectKey);

@@ -16,7 +16,7 @@ export async function runDeps(): Promise<RunDeps> {
       new JiraCloudAdapter(
         new JiraHttp({
           cloudId: project.cloudId,
-          getToken: () => getValidAccessToken(db, userId),
+          getToken: (opts) => getValidAccessToken(db, userId, { forceRefresh: opts?.forceRefresh }),
         }),
       ),
     contextTokensFor: async (project) => (await resolveProviderConfig(db, project)).contextTokens,

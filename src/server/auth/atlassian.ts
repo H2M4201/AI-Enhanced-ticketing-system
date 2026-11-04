@@ -13,6 +13,15 @@ const RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resource
 export type TokenSet = { accessToken: string; refreshToken: string; expiresAt: Date };
 
 /** Atlassian answered with a non-success status. The message carries no response text. */
+/** Atlassian answered successfully but the body is missing something we need. */
+export class AtlassianResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AtlassianResponseError";
+  }
+}
+
+/** Atlassian answered with a non-success status. The message carries no response text. */
 export class AtlassianApiError extends Error {
   readonly status: number;
 
@@ -76,6 +85,7 @@ async function postToken(payload: Record<string, string>, fetchImpl: typeof fetc
 /** Exchanges an authorization code for tokens. */
 export async function exchangeCode(code: string, fetchImpl: typeof fetch = fetch): Promise<TokenSet> {
   const body = await postToken({ grant_type: "authorization_code", code, redirect_uri: redirectUri() }, fetchImpl);
+  if (!body.refresh_token) throw new AtlassianResponseError("Atlassian did not return a refresh token");
   return toTokenSet(body);
 }
 

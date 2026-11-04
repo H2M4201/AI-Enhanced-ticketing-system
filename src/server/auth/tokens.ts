@@ -11,7 +11,7 @@ export type User = typeof users.$inferSelect;
 /** Tokens are refreshed when they expire within this window. */
 const REFRESH_WINDOW_MS = 60_000;
 
-export type TokenOptions = { fetchImpl?: typeof fetch; now?: () => Date };
+export type TokenOptions = { fetchImpl?: typeof fetch; now?: () => Date; forceRefresh?: boolean };
 
 export async function getUserById(db: Db, userId: string): Promise<User> {
   const [row] = await db.select().from(users).where(eq(users.id, userId));
@@ -49,24 +49,38 @@ export async function saveUser(
   return row.id;
 }
 
+/** Refreshes in progress, keyed by user. A concurrent caller joins the refresh that is already running. */
+const inFlight = new Map<string, Promise<string>>();
+
 /**
  * Returns a usable Jira access token for a user. Refreshes it first when it expires within 60 seconds,
- * and stores the rotated refresh token as well. A rejected refresh means the user must sign in again.
+ * or always when forceRefresh is set. The rotated refresh token is stored with it. Concurrent refreshes
+ * for one user share a single request. A rejected refresh means the user must sign in again.
  */
 export async function getValidAccessToken(db: Db, userId: string, opts: TokenOptions = {}): Promise<string> {
   const now = opts.now ?? (() => new Date());
   const user = await getUserById(db, userId);
 
-  if (user.accessTokenExpiresAt.getTime() - now().getTime() > REFRESH_WINDOW_MS) {
+  const expiresSoon = user.accessTokenExpiresAt.getTime() - now().getTime() <= REFRESH_WINDOW_MS;
+  if (!opts.forceRefresh && !expiresSoon) {
     return decryptSecret(user.accessTokenEnc);
   }
 
+  const pending = inFlight.get(userId);
+  if (pending) return pending;
+
+  const refreshing = refreshAndStore(db, user, opts.fetchImpl).finally(() => inFlight.delete(userId));
+  inFlight.set(userId, refreshing);
+  return refreshing;
+}
+
+async function refreshAndStore(db: Db, user: User, fetchImpl: typeof fetch | undefined): Promise<string> {
   let fresh: TokenSet;
   try {
-    fresh = await refresh(decryptSecret(user.refreshTokenEnc), opts.fetchImpl);
+    fresh = await refresh(decryptSecret(user.refreshTokenEnc), fetchImpl);
   } catch (error) {
     if (error instanceof AtlassianApiError && (error.status === 400 || error.status === 401)) {
-      safeLog("auth.reauth_required", { userId, httpStatus: error.status });
+      safeLog("auth.reauth_required", { userId: user.id, httpStatus: error.status });
       throw new ReauthRequiredError();
     }
     throw error;
@@ -79,7 +93,7 @@ export async function getValidAccessToken(db: Db, userId: string, opts: TokenOpt
       refreshTokenEnc: encryptSecret(fresh.refreshToken),
       accessTokenExpiresAt: fresh.expiresAt,
     })
-    .where(eq(users.id, userId));
-  safeLog("auth.token_refreshed", { userId });
+    .where(eq(users.id, user.id));
+  safeLog("auth.token_refreshed", { userId: user.id });
   return fresh.accessToken;
 }

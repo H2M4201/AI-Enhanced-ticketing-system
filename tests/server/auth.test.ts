@@ -4,6 +4,7 @@ import { decryptSecret, encryptSecret } from "@/lib/crypto";
 import { resetEnvCache } from "@/lib/env";
 import {
   AtlassianApiError,
+  AtlassianResponseError,
   buildAuthorizeUrl,
   exchangeCode,
   getMe,
@@ -94,6 +95,12 @@ describe("exchangeCode", () => {
     expect(tokens.accessToken).toBe("at");
     expect(tokens.refreshToken).toBe("rt");
     expect(tokens.expiresAt.getTime() - Date.now()).toBeGreaterThan(3500 * 1000);
+  });
+
+  it("rejects a response without a refresh token instead of storing an empty one", async () => {
+    const fetchImpl = vi.fn(async () => json({ access_token: "at", expires_in: 3600 }));
+    const error = await exchangeCode("auth-code", fetchImpl as unknown as typeof fetch).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(AtlassianResponseError);
   });
 
   it("throws an error with the status and no response text when Atlassian rejects the code", async () => {
@@ -198,6 +205,42 @@ describe("getValidAccessToken", () => {
     }).catch((e: unknown) => e);
     expect(error).not.toBeInstanceOf(ReauthRequiredError);
     expect(error).toBeInstanceOf(AtlassianApiError);
+  });
+});
+
+describe("getValidAccessToken concurrency and forced refresh", () => {
+  it("shares one in-flight refresh between concurrent callers", async () => {
+    const db = await testDb();
+    const user = await insertUser(db, new Date(NOW.getTime() + 30_000));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fetchImpl = vi.fn(async () => {
+      await gate;
+      return json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    });
+    const opts = { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => NOW };
+
+    const first = getValidAccessToken(db, user.id, opts);
+    const second = getValidAccessToken(db, user.id, opts);
+    release();
+
+    expect(await Promise.all([first, second])).toEqual(["new-access", "new-access"]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes a valid token when forceRefresh is set", async () => {
+    const db = await testDb();
+    const user = await insertUser(db, new Date(NOW.getTime() + 10 * 60_000));
+    const fetchImpl = vi.fn(async () => json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 }));
+
+    const token = await getValidAccessToken(db, user.id, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+      forceRefresh: true,
+    });
+
+    expect(token).toBe("new-access");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
