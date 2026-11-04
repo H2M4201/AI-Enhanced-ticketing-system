@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { ProviderBadge } from "@/components/ProviderBadge";
+import { ProviderBadge, ProviderOrNone } from "@/components/ProviderBadge";
 
 afterEach(cleanup);
 
@@ -43,5 +43,15 @@ describe("ProviderBadge", () => {
     unmount();
     render(<ProviderBadge provider={{ source: "env", name: "Local", model: "m", baseUrlHost: "[::1]:8080" }} />);
     expect(screen.queryByText(/cloud/i)).not.toBeInTheDocument();
+  });
+
+  it("labels the server default as Server default", () => {
+    render(<ProviderBadge provider={{ source: "env", name: "Environment default", model: "llama", baseUrlHost: "localhost:11434" }} />);
+    expect(screen.getByText("Server default · llama (localhost:11434)")).toBeInTheDocument();
+  });
+
+  it("shows a notice when no provider is configured", () => {
+    render(<ProviderOrNone provider={null} />);
+    expect(screen.getByText("No provider configured. A breakdown can't start.")).toBeInTheDocument();
   });
 });

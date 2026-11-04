@@ -66,6 +66,8 @@ export type ProjectView = {
   providerProfileId: string | null;
   retentionDays: number;
   owned: boolean;
+  /** The provider the project uses, as the server resolves it. Null when none is configured. Never has a key. */
+  provider: { source: "profile" | "env"; name: string; model: string; baseUrlHost: string } | null;
 };
 
 /** A provider profile as the owner sees it. The key is shown only as its last four characters. */

@@ -3,20 +3,13 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { FilesSection } from "@/components/FilesSection";
+import { siteHost } from "@/lib/format";
 import { ProviderSection } from "@/components/ProviderSection";
 import { RetentionSection } from "@/components/RetentionSection";
 import { card, errorText, primaryButton } from "@/components/styles";
 import { apiFetch, errorMessage, type FileView, type ProfileView, type ProjectView } from "@/lib/api";
 
 type Loaded = { project: ProjectView; files: FileView[]; profiles: ProfileView[] };
-
-function siteHost(siteUrl: string): string {
-  try {
-    return new URL(siteUrl).host;
-  } catch {
-    return siteUrl;
-  }
-}
 
 /** Loads one project with its files and, for the owner, the caller's provider profiles. */
 export function ProjectDetail({ projectId }: { projectId: string }) {
@@ -68,7 +61,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           <h1 className="text-2xl font-semibold tracking-tight">{project.name}</h1>
           <p className="text-sm text-neutral-600">
             {project.jiraProjectKey} on {siteHost(project.siteUrl)}
-            {canEdit ? "" : " · read-only: owned by another user"}
+            {canEdit ? "" : " · shared with you"}
           </p>
         </div>
         <Link href={`/projects/${project.id}/runs/new`} className={primaryButton}>
@@ -82,7 +75,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         title="Guideline files"
         help="How stories, acceptance criteria, sizing and ticket structure should look. Upload one or more .md or .txt files."
         files={files}
-        canEdit={canEdit}
+        canRemove={canEdit}
         templateHref="/templates/guidelines-template.md"
         templateName="Download starter template"
         onChanged={reload}
@@ -94,7 +87,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         title="Routing file"
         help="Teams, people and routing rules. A project has one active routing file; uploading a new one replaces it."
         files={files}
-        canEdit={canEdit}
+        canRemove={canEdit}
         templateHref="/templates/routing-template.md"
         templateName="Download routing template"
         onChanged={reload}
@@ -104,6 +97,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         <h2 className="text-lg font-semibold">AI provider</h2>
         <ProviderSection
           projectId={project.id}
+          provider={project.provider}
           providerProfileId={project.providerProfileId}
           profiles={profiles}
           canEdit={canEdit}

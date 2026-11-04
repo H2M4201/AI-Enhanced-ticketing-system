@@ -23,9 +23,10 @@ export function isCloudHost(host: string): boolean {
 
 export function ProviderBadge({ provider }: { provider: ProviderInfo }) {
   const cloud = isCloudHost(provider.baseUrlHost);
+  const name = provider.source === "env" ? "Server default" : provider.name;
   return (
     <span className="inline-flex flex-wrap items-center gap-2 text-sm text-neutral-700">
-      <span>{`${provider.name} · ${provider.model} (${provider.baseUrlHost})`}</span>
+      <span>{`${name} · ${provider.model} (${provider.baseUrlHost})`}</span>
       {cloud ? (
         <span
           title="Documents are sent to an external service. Do not use this provider for confidential material unless your organisation allows it."
@@ -47,4 +48,12 @@ export function providerFromProfile(profile: Pick<ProfileView, "name" | "model" 
     // Shown as stored, so a bad URL cannot break the page.
   }
   return { source: "profile", name: profile.name, model: profile.model, baseUrlHost: host };
+}
+
+/** The provider in use, or a notice when none is configured. A project without one cannot start a breakdown. */
+export function ProviderOrNone({ provider }: { provider: ProviderInfo | null }) {
+  if (!provider) {
+    return <span className="text-sm font-medium text-red-700">No provider configured. A breakdown can&apos;t start.</span>;
+  }
+  return <ProviderBadge provider={provider} />;
 }

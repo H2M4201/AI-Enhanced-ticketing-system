@@ -4,7 +4,7 @@ import { requireUser } from "@/server/auth/session";
 import { ForbiddenError, ReauthRequiredError } from "@/server/errors";
 import { HttpError, handle, readJson } from "@/server/http";
 import { createProject, findProjectByKey, listOwnedProjects, listProjectsForSites, type Project } from "@/server/projects";
-import { database, isUniqueViolation, jiraFor, projectView, siteFor, sitesFor } from "@/server/route-access";
+import { database, isUniqueViolation, jiraFor, projectView, providerOrNull, siteFor, sitesFor } from "@/server/route-access";
 import type { Db } from "@/server/db/client";
 
 export const runtime = "nodejs";
@@ -46,10 +46,13 @@ export async function GET() {
         return (await canSee(db, user.id, project)) ? project : null;
       }),
     );
+    const listed = visible.filter((project): project is Project => project !== null);
     return {
-      projects: visible
-        .filter((project): project is Project => project !== null)
-        .map((project) => projectView(project, ownedIds.has(project.id))),
+      projects: await Promise.all(
+        listed.map(async (project) =>
+          projectView(project, ownedIds.has(project.id), await providerOrNull(db, project)),
+        ),
+      ),
     };
   }, "projects.list");
 }
@@ -76,7 +79,7 @@ export async function POST(request: Request) {
         siteUrl: site.url,
         jiraProjectKey: key,
       });
-      return projectView(project, true);
+      return projectView(project, true, await providerOrNull(db, project));
     } catch (error) {
       // A concurrent create can pass the check above and then hit the unique key. It gets the same answer.
       if (isUniqueViolation(error)) throw new HttpError(409, "project_exists", `${key} is already set up`);

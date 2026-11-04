@@ -51,3 +51,29 @@ describe("apiFetch", () => {
     expect(new Headers(formInit.headers).get("Content-Type")).toBeNull();
   });
 });
+
+describe("sign-in redirect", () => {
+  function stubLocation() {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, assign });
+    return assign;
+  }
+
+  it.each(["unauthorized", "reauth_required"])("sends a %s response to the sign-in route", async (code) => {
+    const assign = stubLocation();
+    stubFetch(Response.json({ error: { code, message: "Sign in again" } }, { status: 401 }));
+    await expect(apiFetch("/api/projects")).rejects.toMatchObject({ code });
+    expect(assign).toHaveBeenCalledWith("/api/auth/login");
+  });
+
+  it.each([
+    ["forbidden", 403],
+    ["not_found", 404],
+    ["internal", 500],
+  ])("does not redirect for a %s response", async (code, status) => {
+    const assign = stubLocation();
+    stubFetch(Response.json({ error: { code, message: "Nope" } }, { status }));
+    await expect(apiFetch("/api/projects")).rejects.toMatchObject({ code });
+    expect(assign).not.toHaveBeenCalled();
+  });
+});

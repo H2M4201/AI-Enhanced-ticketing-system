@@ -14,7 +14,7 @@ import { handle } from "@/server/http";
 import { ForbiddenError, NotFoundError, ReauthRequiredError, RunStateError } from "@/server/errors";
 import { users } from "@/server/db/schema";
 import { createProfile } from "@/server/providers";
-import { createProject, findProjectByKey, uploadProjectFile } from "@/server/projects";
+import { createProject, findProjectByKey, setProjectProvider, uploadProjectFile } from "@/server/projects";
 import { insertDocument, insertRun, replaceQuestions } from "@/server/runs/repo";
 import { testDb } from "../helpers/db";
 import type { Db } from "@/server/db/client";
@@ -507,5 +507,83 @@ describe("GET /api/providers", () => {
     expect(text).not.toContain(ownKey);
     expect(text).not.toContain(otherKey);
     expect(text).not.toContain("SECRET");
+  });
+});
+
+describe("provider in project responses", () => {
+  afterEach(() => {
+    for (const key of ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"]) delete process.env[key];
+    resetEnvCache();
+  });
+
+  it("describes the project's own profile, without its key", async () => {
+    const { owner, project } = await setup();
+    const profile = await createProfile(db, owner.id, {
+      name: "Team GPT",
+      baseUrl: "https://llm.example.com/v1",
+      apiKey: "sk-profile-SECRET-3333",
+      model: "gpt-team",
+      supportsJsonMode: true,
+      contextTokens: 128000,
+    });
+    await setProjectProvider(db, project.id, profile.id, owner.id);
+
+    const response = await getProject(new Request("http://localhost/api/projects/x"), ctx({ id: project.id }));
+    const text = await response.text();
+    expect(JSON.parse(text).provider).toEqual({
+      source: "profile",
+      name: "Team GPT",
+      model: "gpt-team",
+      baseUrlHost: "llm.example.com",
+    });
+    expect(text).not.toContain("SECRET");
+  });
+
+  it("describes the server default when the project has no profile", async () => {
+    const { project } = await setup();
+    process.env.LLM_BASE_URL = "http://localhost:11434/v1";
+    process.env.LLM_API_KEY = "sk-env-SECRET-4444";
+    process.env.LLM_MODEL = "llama";
+    resetEnvCache();
+
+    const response = await getProject(new Request("http://localhost/api/projects/x"), ctx({ id: project.id }));
+    expect((await response.json()).provider).toEqual({
+      source: "env",
+      name: "Environment default",
+      model: "llama",
+      baseUrlHost: "localhost:11434",
+    });
+  });
+
+  it("returns provider null when there is neither a profile nor a server default", async () => {
+    const { project } = await setup();
+    const response = await getProject(new Request("http://localhost/api/projects/x"), ctx({ id: project.id }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect("provider" in body).toBe(true);
+    expect(body.provider).toBeNull();
+  });
+
+  it("includes the provider in each project of the list", async () => {
+    const { owner, project } = await setup();
+    const profile = await createProfile(db, owner.id, {
+      name: "Team GPT",
+      baseUrl: "https://llm.example.com/v1",
+      apiKey: "sk-profile-SECRET-5555",
+      model: "gpt-team",
+      supportsJsonMode: true,
+      contextTokens: 128000,
+    });
+    await setProjectProvider(db, project.id, profile.id, owner.id);
+    stubSites([{ id: project.cloudId, name: "One", url: project.siteUrl }]);
+
+    const response = await listProjects();
+    const body = await response.json();
+    expect(body.projects[0].provider).toEqual({
+      source: "profile",
+      name: "Team GPT",
+      model: "gpt-team",
+      baseUrlHost: "llm.example.com",
+    });
   });
 });

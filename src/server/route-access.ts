@@ -6,9 +6,10 @@ import { assertOwner, assertProjectAccess } from "@/server/access";
 import { getSites } from "@/server/auth/atlassian";
 import { getValidAccessToken, type User } from "@/server/auth/tokens";
 import type { Db } from "@/server/db/client";
-import { ForbiddenError, NotFoundError } from "@/server/errors";
+import { ForbiddenError, NoProviderError, NotFoundError } from "@/server/errors";
 import { runDeps } from "@/server/deps";
 import { getProject, type Project } from "@/server/projects";
+import { describeProvider, type ProviderDescription } from "@/server/providers";
 import { getRun, type Run } from "@/server/runs/repo";
 import { RunService } from "@/server/runs/service";
 
@@ -85,8 +86,21 @@ export async function serviceFor(): Promise<RunService> {
   return new RunService(await runDeps());
 }
 
+/**
+ * The provider a project would use, or null when none is configured (no profile and no server default).
+ * Only the description is returned: source, name, model and host. The key never leaves the server.
+ */
+export async function providerOrNull(db: Db, project: Project): Promise<ProviderDescription | null> {
+  try {
+    return await describeProvider(db, project);
+  } catch (error) {
+    if (error instanceof NoProviderError) return null;
+    throw error;
+  }
+}
+
 /** A project as the API returns it. The provider key and the Jira tokens never leave the server. */
-export function projectView(project: Project, owned: boolean) {
+export function projectView(project: Project, owned: boolean, provider: ProviderDescription | null) {
   return {
     id: project.id,
     name: project.name,
@@ -96,5 +110,6 @@ export function projectView(project: Project, owned: boolean) {
     providerProfileId: project.providerProfileId,
     retentionDays: project.retentionDays,
     owned,
+    provider,
   };
 }

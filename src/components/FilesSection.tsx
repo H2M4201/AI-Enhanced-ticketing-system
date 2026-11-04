@@ -14,7 +14,8 @@ type Props = {
   title: string;
   help: string;
   files: FileView[];
-  canEdit: boolean;
+  /** Every member can upload. Only the owner can remove. The server enforces both. */
+  canRemove: boolean;
   templateHref: string;
   templateName: string;
   onChanged: () => Promise<void>;
@@ -27,7 +28,7 @@ export function FilesSection({
   title,
   help,
   files,
-  canEdit,
+  canRemove,
   templateHref,
   templateName,
   onChanged,
@@ -91,10 +92,9 @@ export function FilesSection({
         </p>
       ) : null}
 
-      <FileList files={listed} onRemove={canEdit ? remove : undefined} removingId={busy} />
+      <FileList files={listed} onRemove={canRemove ? remove : undefined} removingId={busy} />
 
-      {canEdit ? (
-        <label className={`${secondaryButton} w-fit cursor-pointer ${busy === "upload" ? "opacity-60" : ""}`}>
+      <label className={`${secondaryButton} w-fit cursor-pointer ${busy === "upload" ? "opacity-60" : ""}`}>
           {busy === "upload" ? "Uploading…" : replacing ? "Replace routing file" : "Upload .md or .txt"}
           <input
             type="file"
@@ -103,8 +103,7 @@ export function FilesSection({
             disabled={busy !== null}
             onChange={upload}
           />
-        </label>
-      ) : null}
+      </label>
     </section>
   );
 }

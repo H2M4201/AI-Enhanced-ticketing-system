@@ -2,30 +2,12 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { ProviderBadge, providerFromProfile } from "@/components/ProviderBadge";
+import { ProviderOrNone } from "@/components/ProviderBadge";
 import { card, errorText, primaryButton } from "@/components/styles";
-import { apiFetch, errorMessage, type ProfileView, type ProjectView } from "@/lib/api";
+import { apiFetch, errorMessage, type ProjectView } from "@/lib/api";
+import { siteHost } from "@/lib/format";
 
-type Loaded = { projects: ProjectView[]; profiles: ProfileView[] };
-
-function siteHost(siteUrl: string): string {
-  try {
-    return new URL(siteUrl).host;
-  } catch {
-    return siteUrl;
-  }
-}
-
-/** The provider column. Only the owner sees profile details; others see that one is set. */
-function ProviderCell({ project, profiles }: { project: ProjectView; profiles: ProfileView[] }) {
-  if (project.providerProfileId === null) {
-    return <span className="text-sm text-neutral-500">No AI provider selected</span>;
-  }
-  if (!project.owned) return <span className="text-sm text-neutral-500">Set by the project owner</span>;
-  const profile = profiles.find((p) => p.id === project.providerProfileId);
-  if (!profile) return <span className="text-sm text-red-700">Provider profile not found</span>;
-  return <ProviderBadge provider={providerFromProfile(profile)} />;
-}
+type Loaded = { projects: ProjectView[] };
 
 export function ProjectsList() {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -34,11 +16,8 @@ export function ProjectsList() {
   useEffect(() => {
     async function load() {
       try {
-        const [projects, providers] = await Promise.all([
-          apiFetch<{ projects: ProjectView[] }>("/api/projects"),
-          apiFetch<{ providers: ProfileView[] }>("/api/providers"),
-        ]);
-        setLoaded({ projects: projects.projects, profiles: providers.providers });
+        const response = await apiFetch<{ projects: ProjectView[] }>("/api/projects");
+        setLoaded({ projects: response.projects });
       } catch (e) {
         setError(errorMessage(e));
       }
@@ -83,7 +62,7 @@ export function ProjectsList() {
                   </p>
                 </div>
                 <div className="max-w-full">
-                  <ProviderCell project={project} profiles={loaded.profiles} />
+                  <ProviderOrNone provider={project.provider} />
                 </div>
               </div>
             </li>

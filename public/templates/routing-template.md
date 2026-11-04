@@ -26,4 +26,4 @@ One rule per line. Each line states what the work touches and who takes it.
 - Work that touches checkout or payment capture goes to the Payments team.
 - Work that touches CI, deployment or infrastructure goes to Duc Nguyen.
 - Anything about the design system goes to Linh Pham.
-- Work that matches no rule goes to the Platform team's default person.
+- Work that matches no rule goes to Huong Le, the Platform team's default person.
