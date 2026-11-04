@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
+import { getEnv } from "@/lib/env";
 import type { Db } from "@/server/db/client";
 import { providerProfiles, projectFiles, projects } from "@/server/db/schema";
 import { ForbiddenError, NotFoundError } from "@/server/errors";
@@ -15,7 +16,7 @@ export type NewProject = {
 };
 
 export async function createProject(db: Db, ownerUserId: string, input: NewProject): Promise<Project> {
-  const [row] = await db.insert(projects).values({ ownerUserId, ...input }).returning();
+  const [row] = await db.insert(projects).values({ ownerUserId, retentionDays: getEnv().RETENTION_DAYS, ...input }).returning();
   return row;
 }
 

@@ -432,3 +432,43 @@ describe("ReviewScreen", () => {
     );
   });
 });
+
+describe("ReviewScreen with partial server data", () => {
+  it("merges an edit's draft state into the review and keeps the provider and the epic preview", async () => {
+    const user = userEvent.setup();
+    const initial = review(sampleItems(), { existingEpic: { key: "PROJ-9", summary: "Old epic" } });
+    const accepted = sampleItems().map((i) => (i.id === "s2" ? { ...i, suggestionStatus: "accepted" as const } : i));
+    apiFetchMock.mockImplementation(async (_path, init) =>
+      init?.method === "PATCH"
+        ? { status: "review", draftVersion: 4, items: accepted, blockers: [], assignableUsers: initial.assignableUsers }
+        : initial,
+    );
+    renderScreen();
+
+    await user.click(within(await screen.findByTestId("row-s2")).getByRole("button", { name: /accept/i }));
+
+    await waitFor(() => expect(patchBodies()).toHaveLength(1));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("row-s2")).queryByRole("button", { name: /accept/i })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText(/Server default · test-model/)).toBeInTheDocument();
+    expect(screen.getByText("Will append to PROJ-9 Old epic:")).toBeInTheDocument();
+    await user.click(within(screen.getByTestId("row-s1")).getByText("Guest checkout"));
+    await user.click(within(screen.getByTestId("row-s2")).getByText("Save card for later"));
+    expect(screen.getByRole("textbox", { name: /^title$/i })).toHaveValue("Save card for later");
+    expect(patchBodies()[0].expectedVersion).toBe(3);
+  });
+
+  it("counts only new tickets when the run appends to an existing epic", async () => {
+    serve(review(sampleItems(), { existingEpic: { key: "PROJ-9", summary: "Old epic" } }));
+    renderScreen();
+    expect(await screen.findByRole("button", { name: /create 3 tickets in jira/i })).toBeInTheDocument();
+  });
+
+  it("shows the epic key alone when Jira could not be read, and no-provider text when none is set", async () => {
+    serve(review(sampleItems(), { existingEpic: { key: "PROJ-9", summary: null }, provider: null }));
+    renderScreen();
+    expect(await screen.findByText("Will append to PROJ-9:")).toBeInTheDocument();
+    expect(screen.getByText(/No provider configured/)).toBeInTheDocument();
+  });
+});

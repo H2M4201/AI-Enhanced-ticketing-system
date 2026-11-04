@@ -104,6 +104,8 @@ export const runs = pgTable("runs", {
   clarificationsWritten: boolean("clarifications_written").notNull().default(false),
   /** Set while a ticket creation holds the run. A stale value (older than the lock timeout) no longer counts. */
   creatingSince: timestamp("creating_since", { withTimezone: true }),
+  /** When the last creation attempt ended. Retries wait a few seconds after it, so Jira's search can index the issues. */
+  lastCreateFinishedAt: timestamp("last_create_finished_at", { withTimezone: true }),
   /** Bumped on every draft write. Edits must present the version they were made from. */
   draftVersion: integer("draft_version").notNull().default(0),
   lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ChecksStep } from "@/components/run/ChecksStep";
 import { InputsStep } from "@/components/run/InputsStep";
@@ -177,6 +178,9 @@ export function RunFlow({ runId }: { runId: string }) {
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-3">
         <div>
+          <Link href={`/projects/${project.id}`} className="text-sm text-neutral-600 hover:underline">
+            ← Project
+          </Link>
           <h1 className="text-2xl font-semibold tracking-tight">Epic breakdown</h1>
           <p className="text-sm text-neutral-600">{project.name}</p>
         </div>

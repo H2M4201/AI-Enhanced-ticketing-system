@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD COLUMN "last_create_finished_at" timestamp with time zone;

@@ -1,3 +1,4 @@
+import { APICallError, RetryError } from "ai";
 import { ZodError, type z } from "zod";
 import { LlmOutputError } from "@/core/llm/structured";
 import { DocumentParseError } from "@/core/ingest/parse";
@@ -28,7 +29,15 @@ export class HttpError extends Error {
 }
 
 const INTERNAL_MESSAGE = "Something went wrong";
+const LLM_PROVIDER_NO_STATUS_MESSAGE = "The AI provider could not be reached. Check the provider's URL.";
 const LLM_OUTPUT_MESSAGE = "The AI returned an unusable answer after 3 tries. Try again or switch model.";
+
+/** The provider's HTTP failure inside an AI SDK error, directly or as the last error of a retry. */
+function providerCallError(error: unknown): APICallError | null {
+  if (APICallError.isInstance(error)) return error;
+  if (RetryError.isInstance(error) && APICallError.isInstance(error.lastError)) return error.lastError;
+  return null;
+}
 
 function errorResponse(status: number, code: string, message: string, extra: Record<string, unknown> = {}): Response {
   return Response.json({ error: { code, message, ...extra } }, { status });
@@ -55,6 +64,18 @@ function toErrorResponse(error: unknown, step: string): Response {
   }
   if (error instanceof LlmOutputError) return errorResponse(502, "llm_output", LLM_OUTPUT_MESSAGE);
   if (error instanceof JiraError) return errorResponse(502, "jira", error.messages.join("; "));
+  const providerError = providerCallError(error);
+  if (providerError !== null) {
+    // Only the status goes to the client: the request and response bodies can hold document text.
+    const status = providerError.statusCode;
+    return errorResponse(
+      502,
+      "llm_provider",
+      status === undefined
+        ? LLM_PROVIDER_NO_STATUS_MESSAGE
+        : `The AI provider rejected the request (HTTP ${status}). Check the provider's URL, key and model.`,
+    );
+  }
 
   safeLog("request.failed", {
     step,

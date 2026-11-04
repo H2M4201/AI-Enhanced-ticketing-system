@@ -19,7 +19,7 @@ import type { DraftItem } from "@/core/domain";
 import type { CreateSummary } from "@/core/pipeline/create";
 import { ApiError, apiFetch, errorMessage } from "@/lib/api";
 import type { DraftOp } from "@/server/runs/ops";
-import type { ReviewView } from "@/server/runs/service";
+import type { DraftState, ReviewView } from "@/server/runs/service";
 
 /** Retry stays disabled this long after a failed create: Jira search is eventually consistent, and an early retry can duplicate issues. */
 const RETRY_WAIT_MS = 10_000;
@@ -78,6 +78,13 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
   const adopt = useCallback((next: ReviewView) => {
     versionRef.current = next.draftVersion;
     setReview(next);
+    setSelectedId((current) => (current !== null && next.items.some((item) => item.id === current) ? current : null));
+  }, []);
+
+  /** Takes the draft state an edit returns. The rest of the review (provider, epic, required fields) is unchanged. */
+  const merge = useCallback((next: DraftState) => {
+    versionRef.current = next.draftVersion;
+    setReview((current) => (current === null ? current : { ...current, ...next }));
     setSelectedId((current) => (current !== null && next.items.some((item) => item.id === current) ? current : null));
   }, []);
 
@@ -145,11 +152,11 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
       void queue(async () => {
         try {
           if (blocked.current) return;
-          const next = await apiFetch<ReviewView>(`/api/runs/${runId}/draft`, {
+          const next = await apiFetch<DraftState>(`/api/runs/${runId}/draft`, {
             method: "PATCH",
             body: JSON.stringify({ op, expectedVersion: versionRef.current }),
           });
-          adopt(next);
+          merge(next);
         } catch (error) {
           blocked.current = true;
           setFailure({ message: errorMessage(error), reload: true, unsaved: true });
@@ -158,7 +165,7 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
         }
       });
     },
-    [queue, runId, adopt],
+    [queue, runId, merge],
   );
 
   const onSave = useCallback((id: string, patch: ItemPatch) => save({ type: "update", id, patch }), [save]);
@@ -240,7 +247,8 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
   const { items, status } = review;
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const epic = items.find((item) => item.kind === "epic") ?? null;
-  const toCreate = uncreated(items);
+  // An existing epic is appended to, not created, so it is not counted among the new tickets.
+  const toCreate = uncreated(items).filter((item) => review.existingEpic === null || item.kind !== "epic");
   /** After a failed save the draft is stale: nothing may be edited until a reload. */
   const frozen = failure?.reload === true;
   /** Saves, creates and regenerates hold the controls: a pending save must not race a create. */
@@ -305,7 +313,7 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
       {review.existingEpic !== null ? (
         <div className={`${PANEL} flex flex-col gap-2 text-sm text-neutral-800`}>
           <p className="font-medium">
-            {`Will append to ${review.existingEpic.key} ${review.existingEpic.summary}:`}
+            {`Will append to ${review.existingEpic.key}${review.existingEpic.summary ? ` ${review.existingEpic.summary}` : ""}:`}
           </p>
           {review.clarificationsPreview !== "" ? (
             <pre className="whitespace-pre-wrap rounded bg-neutral-50 p-3 font-sans text-sm text-neutral-800">

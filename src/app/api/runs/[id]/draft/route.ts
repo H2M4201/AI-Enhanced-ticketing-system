@@ -18,7 +18,7 @@ export async function GET(_request: Request, { params }: Params) {
   return handle(async () => {
     const user = await requireUser();
     const { service, run } = await runFor((await params).id, user);
-    return service.getReview(run.id);
+    return service.getReview(run.id, user.id);
   }, "runs.draft.get");
 }
 
@@ -28,17 +28,17 @@ export async function POST(_request: Request, { params }: Params) {
     const user = await requireUser();
     const { service, run } = await runFor((await params).id, user);
     await service.generateDraft(run.id);
-    return service.getReview(run.id);
+    return service.getReview(run.id, user.id);
   }, "runs.draft.generate");
 }
 
-/** Applies one edit. expectedVersion must match the draft the caller saw; a stale one is a 409. */
+/** Applies one edit and returns the new draft state (items, blockers, version, status, assignable users). A stale expectedVersion is a 409. */
 export async function PATCH(request: Request, { params }: Params) {
   return handle(async () => {
     const user = await requireUser();
     const { service, run } = await runFor((await params).id, user);
     const input = await readJson(request, EditDraftSchema);
     await service.editDraft(run.id, input.op, input.expectedVersion);
-    return service.getReview(run.id);
+    return service.getDraftState(run.id);
   }, "runs.draft.edit");
 }

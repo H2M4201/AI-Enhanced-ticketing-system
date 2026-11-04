@@ -79,6 +79,14 @@ Use the sample set in `samples/checkout-revamp`. Upload the files as listed belo
 - [ ] Every description ends with the footer `ai-backlog-item: <id>`.
 - [ ] The epic's description keeps its original text and has a **Clarifications** section appended. The text was not overwritten.
 
+## 9b. Append to an existing epic (spec §2, existing epic)
+
+- [ ] In Jira, create an epic with a description and one child story. Note its key.
+- [ ] Start a new run, enter that key as the existing epic, and go through the steps.
+- [ ] The review says it will append to that epic and add the child tickets. **Create** counts the new tickets only, not the epic.
+- [ ] Create. The epic keeps its original description and children, and a **Clarifications** section is appended once. The new stories are children of this epic. No second epic is created.
+- [ ] Open the review while signed in as another user who can browse the project. It opens, and the epic summary is shown.
+
 ## 10. Forced retry: no duplicates (spec §6.10, Review Focus 4)
 
 Use a second run, so you can see both creation attempts.
@@ -88,14 +96,16 @@ Use a second run, so you can see both creation attempts.
 - [ ] Restore that person to the project.
 - [ ] Click **Retry**. Only the failed items are created.
 - [ ] In Jira, search `labels = "ai-run-<first 8 characters of the run ID>"`. Each draft item appears exactly once.
-- [ ] Click **Create** a third time. Nothing new is created, and the epic's Clarifications appear only once.
+- [ ] The page shows that all tickets are in Jira, and a Jira search finds each item exactly once. The epic's Clarifications appear only once.
+- [ ] Crash in the middle of a create: use another run, click **Create**, and stop the server (Ctrl+C) while it is still creating. Start it again and open the run. Create and Retry are refused with "Creation already in progress, or wait up to N minutes if a previous attempt crashed" until the lock expires (10 minutes), then **Retry** recovers the issues Jira already holds by their label, without duplicates. In Jira, each item still appears exactly once.
+- [ ] Click **Retry** again right after a failed attempt. The app refuses for a few seconds ("Jira is still indexing the last attempt"), then accepts it.
 
 ## 11. Switch provider and run again (spec §2 step 9)
 
 - [ ] In settings, change the project's provider to a different endpoint or model.
 - [ ] The project page shows the new provider and model.
 - [ ] Start a new run on the same epic. Questions, draft and routing all complete.
-- [ ] `npm run eval` runs against the new provider, and its table and JSON file show the same steps.
+- [ ] `npm run eval` uses its own provider settings, not the app's: set `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` in the environment, or pass `--profile-json <file>`. Run it with the new endpoint or model, and its table and JSON file show the same steps.
 
 ## 12. Retention (spec §6.13)
 
@@ -106,7 +116,8 @@ The app does not accept a retention of 0 days. The project setting and `RETENTIO
 - [ ] **Stop the app** (Ctrl+C in the `npm run dev` terminal). PGlite locks its folder, so the script cannot open the database while the app runs.
 - [ ] Run `npm run backdate -- <run id> 2`. It prints `Backdated run <run id> by 2 day(s)`. A message `No run has that ID` means the ID is wrong.
 - [ ] Start the app with `npm run dev`. The purge runs at startup, and then every hour.
-- [ ] Open the run's documents. The text shows **Deleted by retention policy**.
+- [ ] Open the run's documents. Use a run still at the inputs or checked step, because the documents list is shown only there. The text shows **Deleted by retention policy**, and the run's epic text is empty.
+- [ ] The project page lists the run, and it opens from there.
 - [ ] Jira is unchanged by the purge. The tickets that were created remain.
 
 ## 13. Confidentiality in the logs

@@ -7,6 +7,7 @@ import { encryptSecret } from "@/lib/crypto";
 import { resetEnvCache } from "@/lib/env";
 import { JiraCloudAdapter } from "@/integrations/jira/adapter";
 import { JiraError } from "@/integrations/jira/client";
+import { APICallError, RetryError } from "ai";
 import { clearAccessCache } from "@/server/access";
 import { requireUser } from "@/server/auth/session";
 import { runDeps } from "@/server/deps";
@@ -28,6 +29,7 @@ import { POST as postProjectFile } from "@/app/api/projects/[id]/files/route";
 import { DELETE as deleteProjectFile } from "@/app/api/projects/[id]/files/[fileId]/route";
 import { PATCH as patchProject, GET as getProject } from "@/app/api/projects/[id]/route";
 import { GET as listProjects, POST as createProjectRoute } from "@/app/api/projects/route";
+import { GET as listRuns } from "@/app/api/projects/[id]/runs/route";
 import { GET as listProviders } from "@/app/api/providers/route";
 
 vi.mock("@/server/auth/session", () => ({ requireUser: vi.fn() }));
@@ -130,6 +132,34 @@ describe("handle", () => {
     expect(logged).toContain('"errorCode":"Error"');
     expect(logged).toContain('"step":"api"');
     expect(logged).not.toContain("secret epic text");
+  });
+
+  it("maps an AI provider HTTP failure to 502 llm_provider without the request or response body", async () => {
+    const failure = new APICallError({
+      message: "Bad request: secret prompt text",
+      url: "https://llm.example.com/v1/chat/completions",
+      requestBodyValues: { messages: "secret prompt text" },
+      statusCode: 401,
+      responseBody: '{"error":"secret response text"}',
+    });
+    const { status, body } = await errorOf(async () => {
+      throw failure;
+    });
+    expect(status).toBe(502);
+    expect(body.error).toEqual({
+      code: "llm_provider",
+      message: "The AI provider rejected the request (HTTP 401). Check the provider's URL, key and model.",
+    });
+    expect(JSON.stringify(body)).not.toContain("secret");
+  });
+
+  it("maps a provider failure wrapped in a retry error the same way", async () => {
+    const last = new APICallError({ message: "m", url: "https://x", requestBodyValues: {}, statusCode: 503 });
+    const { status, body } = await errorOf(async () => {
+      throw new RetryError({ message: "Failed after 3 attempts", reason: "maxRetriesExceeded", errors: [last] });
+    });
+    expect(status).toBe(502);
+    expect(body.error.message).toContain("(HTTP 503)");
   });
 
   it("maps ForbiddenError to 403", async () => {
@@ -441,6 +471,36 @@ describe("route handlers", () => {
     const body = await response.json();
     expect(body).toMatchObject({ id: project.id, jiraProjectKey: "PAY", owned: true, retentionDays: 7 });
     expect(body).not.toHaveProperty("ownerUserId");
+  });
+});
+
+describe("GET /api/projects/[id]/runs", () => {
+  it("lists the project's runs newest first with a capped first line, and an empty line once purged", async () => {
+    const { owner, other, project } = await setup();
+    const long = `${"x".repeat(200)}
+second line`;
+    const first = await insertRun(db, { projectId: project.id, createdBy: owner.id, epicText: "\n  Older epic\nmore", existingEpicKey: null, fileVersions: [], createdAt: new Date("2026-01-01T00:00:00Z") });
+    const second = await insertRun(db, { projectId: project.id, createdBy: other.id, epicText: long, existingEpicKey: null, fileVersions: [], status: "review", createdAt: new Date("2026-01-02T00:00:00Z") });
+    const purged = await insertRun(db, { projectId: project.id, createdBy: owner.id, epicText: "", existingEpicKey: null, fileVersions: [], status: "done", createdAt: new Date("2026-01-03T00:00:00Z") });
+
+    const response = await listRuns(new Request("http://localhost/api/projects/x/runs"), ctx({ id: project.id }));
+
+    expect(response.status).toBe(200);
+    const { runs } = await response.json();
+    expect(runs.map((r: { id: string }) => r.id)).toEqual([purged.id, second.id, first.id]);
+    expect(runs[0]).toMatchObject({ status: "done", createdByName: "Owner", epicFirstLine: "" });
+    expect(runs[1]).toMatchObject({ status: "review", createdByName: "Other", epicFirstLine: "x".repeat(120) });
+    expect(runs[2].epicFirstLine).toBe("Older epic");
+    expect(typeof runs[2].createdAt).toBe("string");
+  });
+
+  it("returns 403 when the user cannot browse the project in Jira", async () => {
+    const { project } = await setup();
+    vi.mocked(JiraCloudAdapter.prototype.canBrowseProject).mockResolvedValue(false);
+
+    const response = await listRuns(new Request("http://localhost/api/projects/x/runs"), ctx({ id: project.id }));
+
+    expect(response.status).toBe(403);
   });
 });
 

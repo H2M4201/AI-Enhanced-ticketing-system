@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import {
   ClarifyingQuestionSchema,
   DraftItemSchema,
@@ -20,6 +20,9 @@ export type ProjectFileRow = typeof projectFiles.$inferSelect;
 /** A ticket creation whose lock is older than this is treated as abandoned and can be taken over. */
 export const CREATION_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** A retry waits this long after the last attempt ended: Jira search is eventually consistent, and an early retry can duplicate issues. */
+export const RETRY_GAP_MS = 10 * 1000;
+
 const STALE_DRAFT_MESSAGE = "Draft changed in another tab — reload";
 
 function creationLockCutoff(): Date {
@@ -29,6 +32,18 @@ function creationLockCutoff(): Date {
 /** Whether a ticket creation currently holds the run. */
 export function isCreationLocked(run: Run): boolean {
   return run.creatingSince !== null && run.creatingSince.getTime() > Date.now() - CREATION_LOCK_TIMEOUT_MS;
+}
+
+/** Whole minutes (at least 1) until an unexpired creation lock times out, or 0 when none holds the run. */
+export function creationLockMinutesLeft(run: Run): number {
+  if (!isCreationLocked(run) || run.creatingSince === null) return 0;
+  const left = run.creatingSince.getTime() + CREATION_LOCK_TIMEOUT_MS - Date.now();
+  return Math.max(1, Math.ceil(left / 60_000));
+}
+
+/** Whether the last creation attempt ended too recently to start another. */
+export function isWithinRetryGap(run: Run, gapMs: number = RETRY_GAP_MS): boolean {
+  return run.lastCreateFinishedAt !== null && run.lastCreateFinishedAt.getTime() > Date.now() - gapMs;
 }
 
 /** A stored question with its row id, its domain id (Q<rank>) and its resolution once given. */
@@ -221,9 +236,10 @@ export async function saveItemEdit(db: Db, runId: string, expectedVersion: numbe
 
 /**
  * Takes the creation lock and moves the run to creating. Returns false when the run is not
- * in review or creating, or when another creation holds an unexpired lock.
+ * in review or creating, when another creation holds an unexpired lock, or when the last
+ * attempt ended less than `gapMs` ago.
  */
-export async function claimCreation(db: Db, runId: string): Promise<boolean> {
+export async function claimCreation(db: Db, runId: string, gapMs: number = RETRY_GAP_MS): Promise<boolean> {
   const claimed = await db
     .update(runs)
     .set({ status: "creating", creatingSince: new Date() })
@@ -232,14 +248,40 @@ export async function claimCreation(db: Db, runId: string): Promise<boolean> {
         eq(runs.id, runId),
         inArray(runs.status, ["review", "creating"]),
         or(isNull(runs.creatingSince), lt(runs.creatingSince, creationLockCutoff())),
+        or(isNull(runs.lastCreateFinishedAt), lte(runs.lastCreateFinishedAt, new Date(Date.now() - gapMs))),
       ),
     )
     .returning({ id: runs.id });
   return claimed.length > 0;
 }
 
+/** Clears the lock and records when the attempt ended, for the retry gap. */
 export async function releaseCreation(db: Db, runId: string): Promise<void> {
-  await updateRun(db, runId, { creatingSince: null });
+  await updateRun(db, runId, { creatingSince: null, lastCreateFinishedAt: new Date() });
+}
+
+export type RunListRow = {
+  id: string;
+  status: Run["status"];
+  createdAt: Date;
+  createdByName: string;
+  epicText: string;
+};
+
+/** A project's runs, newest first, with the creator's display name. */
+export async function listProjectRuns(db: Db, projectId: string): Promise<RunListRow[]> {
+  return db
+    .select({
+      id: runs.id,
+      status: runs.status,
+      createdAt: runs.createdAt,
+      createdByName: users.displayName,
+      epicText: runs.epicText,
+    })
+    .from(runs)
+    .innerJoin(users, eq(users.id, runs.createdBy))
+    .where(eq(runs.projectId, projectId))
+    .orderBy(desc(runs.createdAt));
 }
 
 /** The draft ordered by parent, then position. */

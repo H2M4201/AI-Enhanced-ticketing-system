@@ -19,7 +19,8 @@ function expiredRunIds(db: Db, now: Date) {
 
 /**
  * Removes the extracted text of expired runs: document sections are nulled and marked deleted,
- * and the epic text of expired done runs is cleared. Already purged documents are skipped.
+ * and the epic text is cleared, whatever the run's status (creating a ticket never reads it).
+ * Already purged documents are skipped.
  * Project files (guidelines and routing) are configuration and are never touched.
  */
 export async function purgeExpired(db: Db, now: Date): Promise<{ documentsPurged: number }> {
@@ -32,7 +33,7 @@ export async function purgeExpired(db: Db, now: Date): Promise<{ documentsPurged
     await tx
       .update(runs)
       .set({ epicText: "" })
-      .where(and(eq(runs.status, "done"), ne(runs.epicText, ""), inArray(runs.id, expiredRunIds(tx, now))));
+      .where(and(ne(runs.epicText, ""), inArray(runs.id, expiredRunIds(tx, now))));
     return purged.length;
   });
   safeLog("retention.purge", { count: documentsPurged });

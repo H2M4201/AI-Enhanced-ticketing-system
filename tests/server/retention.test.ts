@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetEnvCache } from "@/lib/env";
 import { projectFiles, projects, runDocuments, runs, users } from "@/server/db/schema";
 import { createProject, uploadProjectFile } from "@/server/projects";
 import { purgeExpired, startRetentionLoop } from "@/server/retention";
@@ -12,6 +13,11 @@ const SECTIONS = [{ ref: "S1", heading: "Scope", text: "Confidential requirement
 
 beforeEach(() => {
   vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  process.env.ATLASSIAN_CLIENT_ID = "client-id";
+  process.env.ATLASSIAN_CLIENT_SECRET = "client-secret";
+  process.env.SESSION_SECRET = "x".repeat(32);
+  process.env.ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+  resetEnvCache();
 });
 
 afterEach(() => {
@@ -47,7 +53,7 @@ async function addRun(
   db: Seeded["db"],
   s: Seeded,
   values: {
-    status?: "inputs" | "done";
+    status?: "inputs" | "creating" | "done";
     completedAt?: Date | null;
     lastActivityAt: Date;
     createdAt?: Date;
@@ -98,7 +104,40 @@ describe("purgeExpired", () => {
 
     expect((await docOf(s.db, abandoned.id)).sections).toBeNull();
     const [run] = await s.db.select().from(runs).where(eq(runs.id, abandoned.id));
+    expect(run.epicText).toBe("");
+  });
+
+  it("clears the epic text of an expired run in any status, including creating", async () => {
+    const s = await seed(7);
+    const creating = await addRun(s.db, s, { status: "creating", lastActivityAt: daysAgo(10), epicText: "secret epic" });
+
+    await purgeExpired(s.db, NOW);
+
+    const [run] = await s.db.select().from(runs).where(eq(runs.id, creating.id));
+    expect(run.epicText).toBe("");
+  });
+
+  it("keeps the epic text of a run that has not expired", async () => {
+    const s = await seed(7);
+    const recent = await addRun(s.db, s, { status: "inputs", lastActivityAt: daysAgo(1) });
+
+    await purgeExpired(s.db, NOW);
+
+    const [run] = await s.db.select().from(runs).where(eq(runs.id, recent.id));
     expect(run.epicText).toBe("Epic text");
+  });
+
+  it("creates projects with the retention default from RETENTION_DAYS", async () => {
+    process.env.RETENTION_DAYS = "3";
+    resetEnvCache();
+    try {
+      const s = await seed(7);
+      const made = await createProject(s.db, s.user.id, { name: "Y", cloudId: "c", siteUrl: "https://x.atlassian.net", jiraProjectKey: "Y" });
+      expect(made.retentionDays).toBe(3);
+    } finally {
+      delete process.env.RETENTION_DAYS;
+      resetEnvCache();
+    }
   });
 
   it("keeps recent runs and never touches project files", async () => {

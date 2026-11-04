@@ -1,7 +1,7 @@
 "use client";
 
 import { BlockerList } from "@/components/review/BlockerList";
-import { ProviderBadge, type ProviderInfo } from "@/components/ProviderBadge";
+import { ProviderOrNone, type ProviderInfo } from "@/components/ProviderBadge";
 import type { RunStatus } from "@/components/run/types";
 import { primaryButton, secondaryButton } from "@/components/styles";
 import type { Blocker } from "@/core/blockers";
@@ -10,7 +10,7 @@ type Props = {
   epicTitle: string;
   counts: { epics: number; stories: number; tasks: number };
   status: RunStatus;
-  provider: ProviderInfo;
+  provider: ProviderInfo | null;
   /** Null when the epic has no Jira key yet. */
   epicUrl: string | null;
   canRegenerate: boolean;
@@ -53,7 +53,7 @@ export function TopBar(props: Props) {
         <p className="text-sm text-neutral-600">
           {`${plural(counts.epics, "epic")} · ${plural(counts.stories, "story")} · ${plural(counts.tasks, "task")}`}
         </p>
-        <ProviderBadge provider={provider} />
+        <ProviderOrNone provider={provider} />
       </div>
 
       <div className="flex flex-wrap items-center gap-2">

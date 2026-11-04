@@ -7,7 +7,8 @@ import { CreateBlockedError } from "@/core/pipeline/create";
 import { validateStructure } from "@/core/pipeline/structure";
 import { TreeError } from "@/core/tree";
 import { resetEnvCache } from "@/lib/env";
-import { RunStateError } from "@/server/errors";
+import { JiraError } from "@/integrations/jira/client";
+import { ReauthRequiredError, RunStateError } from "@/server/errors";
 import { runs, users } from "@/server/db/schema";
 import { activeFiles, createProject, uploadProjectFile } from "@/server/projects";
 import { getRun, loadDraft, saveDraft, setItemCreated, setItemFailed } from "@/server/runs/repo";
@@ -150,13 +151,14 @@ function serviceWith(db: Db, llm: FakeLlm, fake: FakeTicketingAdapter, overrides
     llmFor: async () => llm,
     adapterFor: async () => fake,
     contextTokensFor: async () => 128000,
+    retryGapMs: 0,
     ...overrides,
   });
 }
 
 /** Applies an edit using the draft version the reviewer currently sees. */
 async function edit(svc: RunService, runId: string, op: Parameters<RunService["editDraft"]>[1]): Promise<DraftItem[]> {
-  const { draftVersion } = await svc.getReview(runId);
+  const { draftVersion } = await svc.getDraftState(runId);
   return svc.editDraft(runId, op, draftVersion);
 }
 
@@ -174,7 +176,7 @@ async function reviewedRun() {
   for (const q of questions) await svc.resolveQuestion(run.id, q.id, { kind: "judgment" });
   await svc.generateDraft(run.id);
 
-  for (const blocker of (await svc.getReview(run.id)).blockers) {
+  for (const blocker of (await svc.getReview(run.id, user.id)).blockers) {
     if (blocker.type === "pending_suggestion") {
       await edit(svc, run.id, { type: "suggestion", id: blocker.itemId, status: "accepted" });
     }
@@ -195,7 +197,7 @@ describe("RunService", () => {
   it("full greenfield run: checks → questions → draft → edit → create", async () => {
     const { db, user, fake, svc, run } = await reviewedRun();
 
-    const review = await svc.getReview(run.id);
+    const review = await svc.getReview(run.id, user.id);
     expect(review.status).toBe("review");
     expect(review.blockers).toEqual([]);
     expect(review.clarificationsPreview).toContain("## Clarifications");
@@ -423,12 +425,12 @@ describe("RunService", () => {
 
   it("a failed item is re-routed and retried alone, and the run ends done", async () => {
     const { db, user, fake, svc, run } = await reviewedRun();
-    const failed = titled((await svc.getReview(run.id)).items, "QA: test one-page guest checkout");
+    const failed = titled((await svc.getReview(run.id, user.id)).items, "QA: test one-page guest checkout");
     fake.failNext.set(failed.id, "User cannot be assigned");
 
     expect(await svc.createTickets(user.id, run.id)).toEqual({ created: 11, failed: 1, skipped: 0 });
     expect((await getRun(db, run.id)).status).toBe("creating");
-    const stuck = titled((await svc.getReview(run.id)).items, failed.title);
+    const stuck = titled((await svc.getReview(run.id, user.id)).items, failed.title);
     expect(stuck.createError).toBe("User cannot be assigned");
     expect(stuck.jiraKey).toBeNull();
 
@@ -439,7 +441,7 @@ describe("RunService", () => {
     expect(fake.issues).toHaveLength(12);
     const created = fake.issues.find((i) => i.summary === failed.title)!;
     expect(created.assigneeAccountId).toBe("acc-linh");
-    const fixed = titled((await svc.getReview(run.id)).items, failed.title);
+    const fixed = titled((await svc.getReview(run.id, user.id)).items, failed.title);
     expect(fixed.createError).toBeNull();
     expect(fixed.jiraKey).toBe(created.key);
     expect((await getRun(db, run.id)).status).toBe("done");
@@ -447,12 +449,12 @@ describe("RunService", () => {
 
   it("allows route and update on an unlinked item while creating, but refuses structural edits", async () => {
     const { user, fake, svc, run } = await reviewedRun();
-    const story = titled((await svc.getReview(run.id)).items, "Checkout: save a card");
+    const story = titled((await svc.getReview(run.id, user.id)).items, "Checkout: save a card");
     fake.failNext.set(story.id, "boom");
     await svc.createTickets(user.id, run.id);
 
     await edit(svc, run.id, { type: "update", id: story.id, patch: { title: "Checkout: save a card (v2)" } });
-    expect(titled((await svc.getReview(run.id)).items, "Checkout: save a card (v2)").id).toBe(story.id);
+    expect(titled((await svc.getReview(run.id, user.id)).items, "Checkout: save a card (v2)").id).toBe(story.id);
 
     await expect(edit(svc, run.id, { type: "delete", id: story.id })).rejects.toBeInstanceOf(RunStateError);
     await expect(edit(svc, run.id, { type: "suggestion", id: story.id, status: "rejected" })).rejects.toBeInstanceOf(
@@ -461,8 +463,8 @@ describe("RunService", () => {
   });
 
   it("rejects a second edit that was made from the same draft version", async () => {
-    const { svc, run } = await reviewedRun();
-    const { draftVersion, items } = await svc.getReview(run.id);
+    const { user, svc, run } = await reviewedRun();
+    const { draftVersion, items } = await svc.getReview(run.id, user.id);
     const story = items.find((i) => i.kind === "story")!;
 
     await svc.editDraft(run.id, { type: "update", id: story.id, patch: { title: "Tab A" } }, draftVersion);
@@ -470,7 +472,7 @@ describe("RunService", () => {
       svc.editDraft(run.id, { type: "update", id: story.id, patch: { title: "Tab B" } }, draftVersion),
     ).rejects.toBeInstanceOf(RunStateError);
 
-    expect(titled((await svc.getReview(run.id)).items, "Tab A").id).toBe(story.id);
+    expect(titled((await svc.getReview(run.id, user.id)).items, "Tab A").id).toBe(story.id);
   });
 
   it("an adapter failure before any create returns the run to review, releases the lock and rethrows", async () => {
@@ -512,5 +514,241 @@ describe("RunService", () => {
     await expect(failing.createTickets(user.id, run.id)).rejects.toThrow("Jira auth expired");
     expect(process.stdout.write).toHaveBeenCalledWith(expect.stringContaining('"event":"run.release_failed"'));
     expect(process.stdout.write).toHaveBeenCalledWith(expect.stringContaining(`"runId":"${run.id}"`));
+  });
+
+  describe("getReview", () => {
+    async function epicRun(adapterFor: RunDeps["adapterFor"]) {
+      const { db, user, project } = await seed();
+      const viewer = (
+        await db
+          .insert(users)
+          .values({
+            atlassianAccountId: "acc-viewer",
+            displayName: "Viewer",
+            accessTokenEnc: "x",
+            refreshTokenEnc: "y",
+            accessTokenExpiresAt: new Date(),
+          })
+          .returning()
+      )[0];
+      const fake = fakeFromSample();
+      const [epic] = await fake.createIssues([
+        {
+          clientRef: "e",
+          projectKey: "CHK",
+          issueTypeId: fake.projectMeta.issueTypes.find((t) => t.name === "Epic")!.id,
+          summary: "Existing epic",
+          description: "Old text.",
+          labels: [],
+        },
+      ]);
+      const svc = serviceWith(db, new FakeLlm([]), fake, { adapterFor });
+      const run = await svc.createRun(user.id, project.id, {
+        epicText: EPIC,
+        existingEpicKey: (epic as { key: string }).key,
+      });
+      return { svc, run, user, viewer, fake };
+    }
+
+    it("reads the existing epic with the viewing user's access, not the creator's", async () => {
+      const seen: string[] = [];
+      const fakeRef: { current?: FakeTicketingAdapter } = {};
+      const { svc, run, user, viewer, fake } = await epicRun(async (userId) => {
+        seen.push(userId);
+        return fakeRef.current!;
+      });
+      fakeRef.current = fake;
+
+      const review = await svc.getReview(run.id, viewer.id);
+
+      expect(seen).toEqual([viewer.id]);
+      expect(seen).not.toContain(user.id);
+      expect(review.existingEpic).toEqual({ key: run.existingEpicKey, summary: "Existing epic" });
+    });
+
+    it("still succeeds, with a null summary, when the epic lookup fails with a Jira error", async () => {
+      const { svc, run, viewer } = await epicRun(async () => {
+        throw new JiraError(500, ["Jira is down"]);
+      });
+
+      const review = await svc.getReview(run.id, viewer.id);
+
+      expect(review.existingEpic).toEqual({ key: run.existingEpicKey, summary: null });
+      expect(process.stdout.write).toHaveBeenCalledWith(expect.stringContaining('"event":"run.epic_lookup_failed"'));
+      expect(process.stdout.write).not.toHaveBeenCalledWith(expect.stringContaining("Jira is down"));
+    });
+
+    it("still requires the viewer to sign in again when their Jira grant is revoked", async () => {
+      const { svc, run, viewer } = await epicRun(async () => {
+        throw new ReauthRequiredError();
+      });
+
+      await expect(svc.getReview(run.id, viewer.id)).rejects.toBeInstanceOf(ReauthRequiredError);
+    });
+
+    it("returns provider null, not an error, when no provider is configured", async () => {
+      const { db, user, project } = await seed();
+      for (const key of ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"]) delete process.env[key];
+      resetEnvCache();
+      const svc = serviceWith(db, new FakeLlm([]), fakeFromSample());
+      const run = await svc.createRun(user.id, project.id, { epicText: EPIC, existingEpicKey: null });
+
+      const review = await svc.getReview(run.id, user.id);
+
+      expect(review.provider).toBeNull();
+      expect(review.items).toEqual([]);
+    });
+
+    it("getDraftState returns only the draft state, with no Jira or provider lookup", async () => {
+      const { db, user, svc, run } = await reviewedRun();
+      const jiraCalls = vi.fn();
+      const quiet = serviceWith(db, new FakeLlm([]), fakeFromSample(), {
+        adapterFor: async () => {
+          jiraCalls();
+          throw new Error("must not be called");
+        },
+      });
+
+      const state = await quiet.getDraftState(run.id);
+
+      expect(Object.keys(state).sort()).toEqual(["assignableUsers", "blockers", "draftVersion", "items", "status"]);
+      expect(state.draftVersion).toBe((await svc.getReview(run.id, user.id)).draftVersion);
+      expect(jiraCalls).not.toHaveBeenCalled();
+    });
+
+    it("an existing epic's own required fields do not block creation", async () => {
+      const { db, user, fake, svc, run } = await reviewedRun();
+      await db.update(runs).set({ existingEpicKey: "CHK-99" }).where(eq(runs.id, run.id));
+      const [row] = await db.select().from(runs).where(eq(runs.id, run.id));
+      const structure = row.structure as { epic: { requiredFields: unknown[] } };
+      structure.epic.requiredFields = [{ key: "customfield_9", name: "Budget" }];
+      await db.update(runs).set({ structure }).where(eq(runs.id, run.id));
+      void fake;
+
+      const review = await svc.getReview(run.id, user.id);
+
+      expect(review.blockers.filter((b) => b.type === "missing_field")).toEqual([]);
+    });
+  });
+
+  describe("run status after a failed create follows Jira", () => {
+    it("stays creating after a network error that followed Jira creating the issues, and Retry recovers by label", async () => {
+      const { db, user, fake, svc, run } = await reviewedRun();
+      const create = fake.createIssues.bind(fake);
+      fake.createIssues = async (issues) => {
+        await create(issues);
+        throw new TypeError("fetch failed");
+      };
+
+      await expect(svc.createTickets(user.id, run.id)).rejects.toBeInstanceOf(TypeError);
+
+      const stuck = await getRun(db, run.id);
+      expect(stuck.status).toBe("creating");
+      expect(stuck.creatingSince).toBeNull();
+      expect(fake.issues).toHaveLength(1);
+
+      fake.createIssues = create;
+      const summary = await svc.createTickets(user.id, run.id);
+
+      expect(summary.failed).toBe(0);
+      expect(fake.issues).toHaveLength(12);
+      expect(new Set(fake.issues.map((i) => i.summary)).size).toBe(12);
+      expect((await getRun(db, run.id)).status).toBe("done");
+    });
+
+    it("returns to review after a network error when Jira holds nothing for the run", async () => {
+      const { db, user, fake, svc, run } = await reviewedRun();
+      fake.createIssues = async () => {
+        throw new TypeError("fetch failed");
+      };
+
+      await expect(svc.createTickets(user.id, run.id)).rejects.toBeInstanceOf(TypeError);
+
+      expect((await getRun(db, run.id)).status).toBe("review");
+    });
+
+    it("stays creating when the label lookup itself fails", async () => {
+      const { db, user, fake, svc, run } = await reviewedRun();
+      const find = fake.findIssuesByLabel.bind(fake);
+      let lookups = 0;
+      fake.findIssuesByLabel = async (projectKey, label) => {
+        // The first lookup is the recovery pass inside the create; the settle lookup fails.
+        if (++lookups > 1) throw new TypeError("fetch failed");
+        return find(projectKey, label);
+      };
+      fake.createIssues = async () => {
+        throw new TypeError("fetch failed");
+      };
+
+      await expect(svc.createTickets(user.id, run.id)).rejects.toBeInstanceOf(TypeError);
+
+      expect((await getRun(db, run.id)).status).toBe("creating");
+    });
+
+    it("returns to review when every item is rejected and Jira holds nothing, and a later Create works", async () => {
+      const { db, user, fake, svc, run } = await reviewedRun();
+      const items = (await svc.getReview(run.id, user.id)).items;
+      for (const item of items) fake.failNext.set(item.id, "Rejected by Jira");
+
+      const summary = await svc.createTickets(user.id, run.id);
+
+      expect(summary.created).toBe(0);
+      expect(summary.failed).toBeGreaterThan(0);
+      expect((await getRun(db, run.id)).status).toBe("review");
+
+      fake.failNext.clear();
+      expect(await svc.createTickets(user.id, run.id)).toMatchObject({ created: 12, failed: 0 });
+      expect((await getRun(db, run.id)).status).toBe("done");
+    });
+  });
+
+  describe("creation gate", () => {
+    it("refuses a retry within the gap after the last attempt, then allows it", async () => {
+      const { db, user, fake, run } = await reviewedRun();
+      const svc = serviceWith(db, new FakeLlm([]), fake, { retryGapMs: 10_000 });
+      const items = await loadDraft(db, run.id);
+      const failed = items.find((i) => i.kind === "task")!;
+      fake.failNext.set(failed.id, "boom");
+
+      await svc.createTickets(user.id, run.id);
+      expect((await getRun(db, run.id)).lastCreateFinishedAt).not.toBeNull();
+      fake.failNext.clear();
+
+      await expect(svc.createTickets(user.id, run.id)).rejects.toThrow(
+        "Jira is still indexing the last attempt. Try again in a few seconds.",
+      );
+      expect(fake.issues).toHaveLength(11);
+
+      await db
+        .update(runs)
+        .set({ lastCreateFinishedAt: new Date(Date.now() - 11_000) })
+        .where(eq(runs.id, run.id));
+      expect(await svc.createTickets(user.id, run.id)).toMatchObject({ created: 1, failed: 0 });
+      expect(fake.issues).toHaveLength(12);
+    });
+
+    it("says when the lock expires while another creation holds it", async () => {
+      const { db, user, svc, run } = await reviewedRun();
+      await db.update(runs).set({ creatingSince: new Date(Date.now() - 60_000) }).where(eq(runs.id, run.id));
+
+      await expect(svc.createTickets(user.id, run.id)).rejects.toThrow(
+        "Creation already in progress, or wait up to 9 minutes if a previous attempt crashed",
+      );
+    });
+  });
+
+  describe("listRuns", () => {
+    it("lists a project's runs newest first with the creator and the first line of the epic", async () => {
+      const { db, user, project } = await seed();
+      const svc = serviceWith(db, new FakeLlm([]), fakeFromSample());
+      const older = await svc.createRun(user.id, project.id, { epicText: `\n  First epic\nsecond line`, existingEpicKey: null });
+      await db.update(runs).set({ createdAt: new Date(Date.now() - 60_000) }).where(eq(runs.id, older.id));
+      const newer = await svc.createRun(user.id, project.id, { epicText: "Newer epic", existingEpicKey: null });
+
+      const list = await svc.listRuns(project.id);
+
+      expect(list.map((r) => r.id)).toEqual([newer.id, older.id]);
+      expect(list[1]).toMatchObject({ status: "inputs", createdByName: "Linh Tran", epicFirstLine: "First epic" });
+    });
   });
 });

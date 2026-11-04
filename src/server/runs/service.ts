@@ -12,7 +12,7 @@ import { parseDocument } from "@/core/ingest/parse";
 import { checkContextBudget } from "@/core/llm/budget";
 import type { LlmClient } from "@/core/llm/client";
 import { generateQuestions as generateClarifyingQuestions } from "@/core/pipeline/clarify";
-import { CreateBlockedError, createInTicketing, type CreateSummary } from "@/core/pipeline/create";
+import { CreateBlockedError, createInTicketing, runLabel, type CreateSummary } from "@/core/pipeline/create";
 import { generateDraft as generateDraftItems } from "@/core/pipeline/draft";
 import { parseRoster, resolveRoster, type UnresolvedName } from "@/core/pipeline/roster";
 import { routeItems } from "@/core/pipeline/route";
@@ -21,7 +21,7 @@ import { activeItems } from "@/core/tree";
 import type { AssignableUser, TicketingAdapter } from "@/core/ticketing/adapter";
 import { safeLog } from "@/lib/log";
 import type { Db } from "@/server/db/client";
-import { NotFoundError, RunStateError } from "@/server/errors";
+import { NoProviderError, NotFoundError, ReauthRequiredError, RunStateError } from "@/server/errors";
 import { describeProvider, type ProviderDescription } from "@/server/providers";
 import { getProject, activeFiles, type Project } from "@/server/projects";
 import {
@@ -40,17 +40,21 @@ import {
 import { applyDraftOp, type DraftOp } from "@/server/runs/ops";
 import {
   claimCreation,
+  creationLockMinutesLeft,
   deleteDocument,
   getRun,
   getRunDocument,
   insertDocument,
   insertRun,
   isCreationLocked,
+  isWithinRetryGap,
   listDocuments,
+  listProjectRuns,
   listQuestions,
   loadDraft,
   releaseCreation,
   replaceQuestions,
+  RETRY_GAP_MS,
   type Run,
   saveDraft,
   saveDraftVersioned,
@@ -69,7 +73,26 @@ export type RunDeps = {
   adapterFor: (userId: string, project: Project) => Promise<TicketingAdapter>;
   /** The context window of the project's provider, used for the input budget check. */
   contextTokensFor: (project: Project) => Promise<number>;
+  /** How long a retry waits after the last creation attempt ended. Defaults to RETRY_GAP_MS; tests set 0. */
+  retryGapMs?: number;
 };
+
+/** One row of a project's run list. */
+export type RunListItem = {
+  id: string;
+  status: Run["status"];
+  createdAt: Date;
+  createdByName: string;
+  /** The first line of the epic text, capped at EPIC_LINE_MAX. Empty once retention has purged the text. */
+  epicFirstLine: string;
+};
+
+const EPIC_LINE_MAX = 120;
+
+function firstLineOf(text: string): string {
+  const line = text.split(/\r?\n/).find((candidate) => candidate.trim() !== "") ?? "";
+  return line.trim().slice(0, EPIC_LINE_MAX);
+}
 
 export type RunDocumentView = {
   id: string;
@@ -101,11 +124,16 @@ export type ReviewView = {
   items: DraftItem[];
   blockers: Blocker[];
   requiredFields: Record<ItemKind, { key: string; name: string }[]>;
-  provider: ProviderDescription;
-  existingEpic: { key: string; summary: string } | null;
+  /** Null when no provider is configured for the project. */
+  provider: ProviderDescription | null;
+  /** The summary is null when Jira could not be read; the UI then shows the key alone. */
+  existingEpic: { key: string; summary: string | null } | null;
   clarificationsPreview: string;
   assignableUsers: AssignableUser[];
 };
+
+/** What an edit changes: the review without the provider and the existing-epic lookups. */
+export type DraftState = Pick<ReviewView, "status" | "draftVersion" | "items" | "blockers" | "assignableUsers">;
 
 function assertStatus(run: Run, allowed: Run["status"][], message: string): void {
   if (!allowed.includes(run.status)) throw new RunStateError(message);
@@ -362,33 +390,85 @@ export class RunService {
     return { id: document.id, filename: document.filename, kind: document.kind, sections: document.sections };
   }
 
-  async getReview(runId: string): Promise<ReviewView> {
+  /** The runs of a project, newest first. The epic text is cut to its first line and is empty once purged. */
+  async listRuns(projectId: string): Promise<RunListItem[]> {
+    const rows = await listProjectRuns(this.deps.db, projectId);
+    return rows.map((row) => ({
+      id: row.id,
+      status: row.status,
+      createdAt: row.createdAt,
+      createdByName: row.createdByName,
+      epicFirstLine: firstLineOf(row.epicText),
+    }));
+  }
+
+  /**
+   * The review screen's state. `actingUserId` is the viewer: the existing epic is read from Jira with
+   * their token, never the creator's. That lookup is best effort; the provider may be missing.
+   */
+  async getReview(runId: string, actingUserId: string): Promise<ReviewView> {
     const { db } = this.deps;
     const run = await getRun(db, runId);
     await touch(db, runId);
     const project = await getProject(db, run.projectId);
-    const items = await loadDraft(db, runId);
+    const state = await this.draftStateOf(run);
     const requiredFields = requiredFieldsOf(structureOf(run));
     const stored = await listQuestions(db, runId);
 
     return {
+      ...state,
+      requiredFields,
+      provider: await this.providerOrNull(project),
+      existingEpic:
+        run.existingEpicKey === null ? null : await this.existingEpic(actingUserId, project, run.existingEpicKey, runId),
+      clarificationsPreview: clarificationsTextOf(stored),
+    };
+  }
+
+  /** The draft after an edit: no Jira and no provider lookups. */
+  async getDraftState(runId: string): Promise<DraftState> {
+    return this.draftStateOf(await getRun(this.deps.db, runId));
+  }
+
+  private async draftStateOf(run: Run): Promise<DraftState> {
+    const items = await loadDraft(this.deps.db, run.id);
+    return {
       status: run.status,
       draftVersion: run.draftVersion,
       items,
-      blockers: computeBlockers(items, requiredFields),
-      requiredFields,
-      provider: await describeProvider(db, project),
-      existingEpic: run.existingEpicKey === null ? null : await this.existingEpic(run.createdBy, project, run.existingEpicKey),
-      clarificationsPreview: clarificationsTextOf(stored),
+      blockers: computeBlockers(items, requiredFieldsOf(structureOf(run)), { existingEpic: run.existingEpicKey !== null }),
       assignableUsers: run.assignableUsers ?? [],
     };
   }
 
-  /** The epic's summary is read from Jira with the run creator's access. */
-  private async existingEpic(creatorId: string, project: Project, key: string): Promise<{ key: string; summary: string }> {
-    const adapter = await this.deps.adapterFor(creatorId, project);
-    const issue = await adapter.getIssue(key);
-    return { key, summary: issue?.summary ?? "" };
+  private async providerOrNull(project: Project): Promise<ProviderDescription | null> {
+    try {
+      return await describeProvider(this.deps.db, project);
+    } catch (error) {
+      if (error instanceof NoProviderError) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * The epic summary, read with the acting user access. A Jira or network failure gives a null summary
+   * so the review still opens; losing the Jira sign-in still propagates, since the user must sign in again.
+   */
+  private async existingEpic(
+    userId: string,
+    project: Project,
+    key: string,
+    runId: string,
+  ): Promise<{ key: string; summary: string | null }> {
+    try {
+      const adapter = await this.deps.adapterFor(userId, project);
+      const issue = await adapter.getIssue(key);
+      return { key, summary: issue?.summary ?? null };
+    } catch (error) {
+      if (error instanceof ReauthRequiredError) throw error;
+      safeLog("run.epic_lookup_failed", { runId, errorCode: error instanceof Error ? error.name : "unknown" });
+      return { key, summary: null };
+    }
   }
 
   /**
@@ -404,21 +484,18 @@ export class RunService {
     const structure = requireStructure(run);
     const requiredFields = requiredFieldsOf(structure);
 
-    const blockers = computeBlockers(await loadDraft(db, runId), requiredFields);
+    const blockers = computeBlockers(await loadDraft(db, runId), requiredFields, {
+      existingEpic: run.existingEpicKey !== null,
+    });
     if (blockers.length > 0) throw new CreateBlockedError(blockers);
 
     // The claim is the only guard against two creations running at once. It re-checks the status atomically.
-    if (!(await claimCreation(db, runId))) {
-      const current = await getRun(db, runId);
-      throw new RunStateError(
-        ["review", "creating"].includes(current.status)
-          ? "Creation already in progress"
-          : "Tickets can only be created from a reviewed draft",
-      );
-    }
+    const gapMs = this.deps.retryGapMs ?? RETRY_GAP_MS;
+    if (!(await claimCreation(db, runId, gapMs))) throw await this.claimRefusal(runId, gapMs);
 
+    let adapter: TicketingAdapter | null = null;
     try {
-      const adapter = await this.deps.adapterFor(userId, project);
+      adapter = await this.deps.adapterFor(userId, project);
       const meta = await adapter.getProjectMeta(project.jiraProjectKey);
       const acceptedByName = await userDisplayName(db, userId);
       const stored = await listQuestions(db, runId);
@@ -443,25 +520,47 @@ export class RunService {
 
       const complete = activeItems(await loadDraft(db, runId)).every((item) => item.jiraKey !== null);
       if (complete) await updateRun(db, runId, { status: "done", completedAt: new Date() });
-      safeLog("run.tickets", { runId, count: summary.created, status: complete ? "done" : "creating" });
+      else await this.settleUnfinished(runId, adapter, project.jiraProjectKey);
+      safeLog("run.tickets", { runId, count: summary.created, status: (await getRun(db, runId)).status });
       return summary;
     } catch (error) {
-      await this.settleFailedCreation(runId);
+      await this.settleUnfinished(runId, adapter, project.jiraProjectKey);
       throw error;
     } finally {
       await this.releaseLock(runId);
     }
   }
 
+  /** Why the creation claim was refused, as a state error the caller can show. */
+  private async claimRefusal(runId: string, gapMs: number): Promise<RunStateError> {
+    const current = await getRun(this.deps.db, runId);
+    if (!["review", "creating"].includes(current.status)) {
+      return new RunStateError("Tickets can only be created from a reviewed draft");
+    }
+    if (isCreationLocked(current)) {
+      const minutes = creationLockMinutesLeft(current);
+      return new RunStateError(
+        `Creation already in progress, or wait up to ${minutes} minute${minutes === 1 ? "" : "s"} if a previous attempt crashed`,
+      );
+    }
+    if (isWithinRetryGap(current, gapMs)) {
+      return new RunStateError("Jira is still indexing the last attempt. Try again in a few seconds.");
+    }
+    return new RunStateError("Creation already in progress");
+  }
+
   /**
-   * After a failure, returns the run to review when no ticket was created, so the reviewer keeps
-   * the review-only operations. A run that already has created tickets stays creating for Retry.
-   * Never throws: the original error is what the caller needs to see.
+   * After a creation that did not finish, decides the run status from Jira, not only from recorded keys.
+   * The run returns to review only when no item has a key and Jira holds nothing under the run label;
+   * otherwise it stays creating, so Retry can recover the issues by label. If the label lookup fails the run
+   * stays creating, which keeps Retry available. Never throws: the original error is what the caller needs.
    */
-  private async settleFailedCreation(runId: string): Promise<void> {
+  private async settleUnfinished(runId: string, adapter: TicketingAdapter | null, projectKey: string): Promise<void> {
     try {
       const { db } = this.deps;
       if (activeItems(await loadDraft(db, runId)).some((item) => item.jiraKey !== null)) return;
+      // Without an adapter nothing could have been sent to Jira.
+      if (adapter !== null && (await adapter.findIssuesByLabel(projectKey, runLabel(runId))).length > 0) return;
       await updateRun(db, runId, { status: "review" });
     } catch {
       safeLog("run.settle_failed", { runId, errorCode: "settle_failed" });

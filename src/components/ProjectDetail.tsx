@@ -6,10 +6,11 @@ import { FilesSection } from "@/components/FilesSection";
 import { siteHost } from "@/lib/format";
 import { ProviderSection } from "@/components/ProviderSection";
 import { RetentionSection } from "@/components/RetentionSection";
+import { RunsSection, type RunListEntry } from "@/components/RunsSection";
 import { card, errorText, primaryButton } from "@/components/styles";
 import { apiFetch, errorMessage, type FileView, type ProfileView, type ProjectView } from "@/lib/api";
 
-type Loaded = { project: ProjectView; files: FileView[]; profiles: ProfileView[] };
+type Loaded = { project: ProjectView; files: FileView[]; profiles: ProfileView[]; runs: RunListEntry[] };
 
 /** Loads one project with its files and, for the owner, the caller's provider profiles. */
 export function ProjectDetail({ projectId }: { projectId: string }) {
@@ -23,12 +24,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     async function load() {
       try {
         const project = await apiFetch<ProjectView>(`/api/projects/${projectId}`);
-        const [files, profiles] = await Promise.all([
+        const [files, runs, profiles] = await Promise.all([
           apiFetch<{ files: FileView[] }>(`/api/projects/${projectId}/files`),
+          apiFetch<{ runs: RunListEntry[] }>(`/api/projects/${projectId}/runs`),
           project.owned ? apiFetch<{ providers: ProfileView[] }>("/api/providers") : Promise.resolve({ providers: [] }),
         ]);
         if (!current) return;
-        setLoaded({ project, files: files.files, profiles: profiles.providers });
+        setLoaded({ project, files: files.files, profiles: profiles.providers, runs: runs.runs });
         setError(null);
       } catch (e) {
         if (current) setError(errorMessage(e));
@@ -51,7 +53,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   }
   if (!loaded) return <p className="text-neutral-600">Loading project…</p>;
 
-  const { project, files, profiles } = loaded;
+  const { project, files, profiles, runs } = loaded;
   const canEdit = project.owned;
 
   return (
@@ -68,6 +70,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           Start a new breakdown
         </Link>
       </div>
+
+      <RunsSection runs={runs} />
 
       <FilesSection
         projectId={project.id}

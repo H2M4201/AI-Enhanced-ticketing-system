@@ -129,6 +129,8 @@ The evaluation creates tickets in a fake Jira project, not in your Jira site. It
 - **Team routing uses components only.** A team in the routing file becomes a Jira component with the same name. The Jira Team field is not set, because it needs Atlassian Teams IDs, and that is deferred.
 - **Single-call draft generation.** The epic, stories and tasks come from one model call, not a staged process. Very large inputs may fit poorly in a small context window. The app checks the input size before it calls the model.
 - **PGlite is the default database, not Postgres.** The build machine has no Docker, so the default is the embedded PGlite database at `./.data/pglite`. Postgres is optional and is enabled by setting `DATABASE_URL`.
+- **Required custom fields support text values only.** A required Jira field is filled from a text box in the review. Fields that need an option, a user, a date or another structure cannot be set in the app yet.
+- **File permissions on a project.** Any member who can browse the Jira project may upload or replace its guideline and routing files. Only the owner can remove them. This is intended.
 - **Guideline-requested Jira labels are not applied.** Created issues get only `ai-backlog`, `ai-run-<first 8 characters of the run ID>`, and `ai-suggested` on accepted AI suggestions. A label that a guideline file asks for, such as `checkout`, is not added.
 
 ## Testing
@@ -142,6 +144,6 @@ For the live end-to-end check against your Jira test site, follow [docs/smoke-te
 
 ## Data handling
 
-- Uploaded documents and extracted text are deleted after the retention period. The default is `RETENTION_DAYS=7`, and the owner can change it per project. A purge runs at startup and then every hour.
+- Uploaded documents, their extracted text and the epic text are deleted after the retention period. The default is `RETENTION_DAYS=7`, and the owner can change it per project. A purge runs at startup and then every hour.
 - API keys and Jira tokens are encrypted at rest. The UI shows only the last four characters of a key.
 - Logs record IDs, counts, timings and error codes only.

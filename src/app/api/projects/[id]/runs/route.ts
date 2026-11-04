@@ -11,6 +11,15 @@ const CreateRunSchema = z.object({
   existingEpicKey: z.string().trim().min(1).max(64).nullable().optional(),
 });
 
+/** The project's runs, newest first, so a run can be opened again after the page is left. */
+export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+  return handle(async () => {
+    const user = await requireUser();
+    const { project } = await projectFor((await params).id, user);
+    return { runs: await (await serviceFor()).listRuns(project.id) };
+  }, "runs.list");
+}
+
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   return handle(async () => {
     const user = await requireUser();
