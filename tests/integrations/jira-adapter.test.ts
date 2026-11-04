@@ -412,6 +412,23 @@ describe("JiraCloudAdapter issues", () => {
   });
 });
 
+describe("JiraCloudAdapter projects", () => {
+  it("lists projects across pages until isLast", async () => {
+    const page1 = { values: range(50).map((i) => ({ id: `${i}`, key: `P${i}`, name: `Project ${i}` })), isLast: false, startAt: 0 };
+    const page2 = { values: [{ id: "99", key: "NGU", name: "Nguyễn Dự Án" }], isLast: true, startAt: 50 };
+    const { adapter, calls } = setup((c) => {
+      if (c.path !== "/rest/api/3/project/search") return undefined;
+      return { body: c.query.get("startAt") === "0" ? page1 : page2 };
+    });
+    const projects = await adapter.listProjects();
+    expect(projects).toHaveLength(51);
+    expect(projects[0]).toEqual({ id: "0", key: "P0", name: "Project 0" });
+    expect(projects[50]).toEqual({ id: "99", key: "NGU", name: "Nguyễn Dự Án" });
+    expect(calls.map((c) => c.query.get("startAt"))).toEqual(["0", "50"]);
+    expect(calls[0].query.get("maxResults")).toBe("50");
+  });
+});
+
 describe("JiraHttp", () => {
   it("retries once with a new token on 401", async () => {
     const { adapter, calls, getToken } = setup(

@@ -19,6 +19,9 @@ const BULK_CHUNK = 50;
 const USER_PAGE = 100;
 const CREATEMETA_PAGE = 50;
 const SEARCH_PAGE = 100;
+const PROJECT_PAGE = 50;
+
+type ProjectSearchPage = { values: { id: string; key: string; name: string }[]; isLast: boolean };
 
 type JiraProject = {
   id: string;
@@ -250,6 +253,21 @@ export class JiraCloudAdapter implements TicketingAdapter {
     } catch (err) {
       if (isNotFound(err)) return false;
       throw err;
+    }
+  }
+
+  /** Jira projects the token can see. A Jira-only query: it is not part of TicketingAdapter. */
+  async listProjects(): Promise<{ id: string; key: string; name: string }[]> {
+    const projects: { id: string; key: string; name: string }[] = [];
+    let startAt = 0;
+    for (;;) {
+      const page = await this.http.request<ProjectSearchPage>(
+        "GET",
+        `/rest/api/3/project/search?startAt=${startAt}&maxResults=${PROJECT_PAGE}`,
+      );
+      for (const p of page.values) projects.push({ id: p.id, key: p.key, name: p.name });
+      if (page.isLast || page.values.length === 0) return projects;
+      startAt += page.values.length;
     }
   }
 

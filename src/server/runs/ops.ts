@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { DraftItem } from "@/core/domain";
 import { addItem, deleteItem, moveItem, overrideRouting, setSuggestionStatus, TreeError, updateItem } from "@/core/tree";
 import type { AssignableUser } from "@/core/ticketing/adapter";
@@ -14,6 +15,26 @@ export type DraftOp =
     }
   | { type: "suggestion"; id: string; status: "accepted" | "rejected" }
   | { type: "route"; id: string; accountId: string };
+
+/** Validates a DraftOp from a request body. Unknown keys are dropped, so an op cannot set fields it does not own. */
+export const DraftOpSchema: z.ZodType<DraftOp> = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("add"), parentId: z.string(), kind: z.enum(["story", "task"]), title: z.string().min(1) }),
+  z.object({ type: z.literal("delete"), id: z.string() }),
+  z.object({ type: z.literal("move"), id: z.string(), newParentId: z.string() }),
+  z.object({
+    type: z.literal("update"),
+    id: z.string(),
+    patch: z.object({
+      title: z.string().optional(),
+      description: z.string().optional(),
+      acceptanceCriteria: z.array(z.string()).optional(),
+      estimate: z.number().nullable().optional(),
+      fieldValues: z.record(z.string(), z.unknown()).optional(),
+    }),
+  }),
+  z.object({ type: z.literal("suggestion"), id: z.string(), status: z.enum(["accepted", "rejected"]) }),
+  z.object({ type: z.literal("route"), id: z.string(), accountId: z.string() }),
+]);
 
 /** Structural changes (adding under, deleting or moving an item) are refused once an item exists in Jira. */
 function assertNotCreated(items: DraftItem[], id: string, action: string): void {

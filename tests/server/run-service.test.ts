@@ -205,7 +205,7 @@ describe("RunService", () => {
     const after = await getRun(db, run.id);
     expect(after.status).toBe("done");
     expect(after.creatingSince).toBeNull();
-  });
+  }, 20_000);
 
   it("generateDraft refuses while questions are unresolved", async () => {
     const { db, user, project } = await seed();

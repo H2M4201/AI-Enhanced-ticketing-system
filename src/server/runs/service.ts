@@ -45,6 +45,7 @@ import {
   insertDocument,
   insertRun,
   isCreationLocked,
+  listDocuments,
   listQuestions,
   loadDraft,
   releaseCreation,
@@ -327,6 +328,28 @@ export class RunService {
     if (!changed) throw new NotFoundError("Draft item");
     await saveItemEdit(db, runId, expectedVersion, changed);
     return next;
+  }
+
+  /** The run page's stored state: status, documents, the saved check results and the questions. The epic text is not included. */
+  async getRunDetail(runId: string) {
+    const { db } = this.deps;
+    const run = await getRun(db, runId);
+    const documents = await listDocuments(db, runId);
+    const questions = await listQuestions(db, runId);
+    return {
+      run: {
+        id: run.id,
+        projectId: run.projectId,
+        status: run.status,
+        existingEpicKey: run.existingEpicKey,
+        clarificationsWritten: run.clarificationsWritten,
+        draftVersion: run.draftVersion,
+        completedAt: run.completedAt,
+      },
+      documents: documents.map((doc) => ({ id: doc.id, filename: doc.filename, kind: doc.kind, charCount: doc.charCount })),
+      checks: { structure: run.structure, roster: run.roster, assignableUsers: run.assignableUsers },
+      questions: questions.map((entry) => ({ ...entry.question, resolution: entry.resolution })),
+    };
   }
 
   async getReview(runId: string): Promise<ReviewView> {

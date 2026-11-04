@@ -107,3 +107,32 @@ export async function activeFiles(db: Db, projectId: string): Promise<ProjectFil
     .from(projectFiles)
     .where(and(eq(projectFiles.projectId, projectId), eq(projectFiles.active, true)));
 }
+
+/** Projects a user owns, on any site. */
+export async function listOwnedProjects(db: Db, ownerUserId: string): Promise<Project[]> {
+  return db.select().from(projects).where(eq(projects.ownerUserId, ownerUserId));
+}
+
+/** The project already set up for a Jira project key on a site, or null. */
+export async function findProjectByKey(db: Db, cloudId: string, jiraProjectKey: string): Promise<Project | null> {
+  const [row] = await db
+    .select()
+    .from(projects)
+    .where(and(eq(projects.cloudId, cloudId), eq(projects.jiraProjectKey, jiraProjectKey)));
+  return row ?? null;
+}
+
+/** A file that belongs to the project, including inactive versions. Throws NotFoundError otherwise. */
+export async function getProjectFile(db: Db, projectId: string, fileId: string): Promise<ProjectFile> {
+  const [row] = await db
+    .select()
+    .from(projectFiles)
+    .where(and(eq(projectFiles.id, fileId), eq(projectFiles.projectId, projectId)));
+  if (!row) throw new NotFoundError("File");
+  return row;
+}
+
+/** Deletes a project. Its files and runs are removed by the database cascade. */
+export async function deleteProject(db: Db, projectId: string): Promise<void> {
+  await db.delete(projects).where(eq(projects.id, projectId));
+}
