@@ -23,7 +23,7 @@ const TaskReplySchema = z.object({
 });
 
 const StoryReplySchema = z.object({
-  tempId: z.string(),
+  tempId: z.string().optional(),
   title: z.string(),
   description: z.string(),
   acceptanceCriteria: z.array(z.string()),
@@ -38,7 +38,7 @@ const StoryReplySchema = z.object({
 /** Model reply: the epic, then its stories, each with its tasks. Ids and positions are assigned in code. */
 export const DraftOutputSchema = z.object({
   epic: z.object({ title: z.string(), description: z.string() }),
-  stories: z.array(StoryReplySchema),
+  stories: z.array(StoryReplySchema).min(1),
 });
 export type DraftOutput = z.infer<typeof DraftOutputSchema>;
 
@@ -60,9 +60,12 @@ type MappingContext = {
   newId: () => string;
 };
 
-/** Collapses every whitespace run to one space, trims, and caps at the Jira summary limit. */
+/**
+ * Collapses every whitespace run to one space, trims, and caps at the Jira summary limit.
+ * The cap counts code points, so it never splits a surrogate pair.
+ */
 function cleanTitle(value: string, kind: ItemKind): string {
-  const title = value.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE_LENGTH).trim();
+  const title = Array.from(value.replace(/\s+/g, " ").trim()).slice(0, MAX_TITLE_LENGTH).join("").trim();
   return title === "" ? `Untitled ${kind}` : title;
 }
 
@@ -71,8 +74,9 @@ function cleanEntries(values: string[]): string[] {
 }
 
 /**
- * Maps one model entry to a DraftItem. Unknown refs and guideline names are dropped. A story or task
- * with no valid ref is downgraded to an AI suggestion. The epic keeps its origin.
+ * Maps one model entry to a DraftItem. Unknown refs and guideline names are dropped. A from_docs
+ * story or task with no valid ref is downgraded to an AI suggestion, except a task that a valid
+ * guideline mandates under a from_docs parent, which stays from_docs. The epic keeps its origin.
  */
 function buildItem(
   id: string,
@@ -81,9 +85,13 @@ function buildItem(
   position: number,
   source: Source,
   ctx: MappingContext,
+  parentOrigin: DraftItem["origin"] | null,
 ): DraftItem {
-  const sourceRefs = source.sourceRefs.filter((ref) => ctx.validRefs.has(ref));
-  const ungrounded = kind !== "epic" && source.origin === "from_docs" && sourceRefs.length === 0;
+  const sourceRefs = [...new Set(source.sourceRefs.filter((ref) => ctx.validRefs.has(ref)))];
+  const shapedBy = [...new Set(source.shapedBy.filter((name) => ctx.guidelineNames.has(name)))];
+  const guidelineMandated = kind === "task" && parentOrigin === "from_docs" && shapedBy.length > 0;
+  const ungrounded =
+    kind !== "epic" && source.origin === "from_docs" && sourceRefs.length === 0 && !guidelineMandated;
   const origin: DraftItem["origin"] = ungrounded ? "ai_suggestion" : source.origin;
   return {
     id,
@@ -97,7 +105,7 @@ function buildItem(
     sourceRefs,
     origin,
     assumption: source.assumptionQuestionIds.some((qid) => ctx.judgmentIds.has(qid)),
-    shapedBy: [...new Set(source.shapedBy.filter((name) => ctx.guidelineNames.has(name)))],
+    shapedBy,
     suggestionStatus: origin === "ai_suggestion" ? "pending" : null,
     routing: null,
     fieldValues: {},
@@ -114,14 +122,15 @@ function toDraftItems(reply: DraftOutput, ctx: MappingContext): DraftItem[] {
     0,
     { ...reply.epic, sourceRefs: [], origin: "from_docs", assumptionQuestionIds: [], shapedBy: [] },
     ctx,
+    null,
   );
   const items: DraftItem[] = [epic];
 
   reply.stories.forEach((story, storyPosition) => {
-    const storyItem = buildItem(ctx.newId(), "story", epic.id, storyPosition, story, ctx);
+    const storyItem = buildItem(ctx.newId(), "story", epic.id, storyPosition, story, ctx, null);
     items.push(storyItem);
     story.tasks.forEach((task, taskPosition) => {
-      items.push(buildItem(ctx.newId(), "task", storyItem.id, taskPosition, task, ctx));
+      items.push(buildItem(ctx.newId(), "task", storyItem.id, taskPosition, task, ctx, storyItem.origin));
     });
   });
 

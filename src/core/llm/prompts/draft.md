@@ -9,7 +9,8 @@ Rules:
 - The guidelines take priority over the defaults in these rules. Follow their story format, acceptance criteria style, sizing, ticket structure and standard tasks.
 - The epic's title and description come from the epic text. Give the epic "origin": "from_docs" and "sourceRefs": [].
 - "origin": "from_docs" is allowed only when the item states a requirement that a cited section actually says. Its "sourceRefs" lists those sections, copied exactly from the square brackets.
-- Never invent requirements as "from_docs". Anything not grounded in a cited section is "origin": "ai_suggestion", with "sourceRefs": [] or the sections it relates to. Standard tasks that the guidelines ask for, and engineering work the documents do not name, are "ai_suggestion".
+- Never invent requirements as "from_docs". Anything not grounded in a cited section is "origin": "ai_suggestion", with "sourceRefs": [] or the sections it relates to. Engineering work the documents do not name is "ai_suggestion".
+- A standard task the guidelines mandate for a story, such as "QA: test <story>", is "origin": "from_docs" when its story is "from_docs". Name the mandating guideline file in its "shapedBy" and leave its "sourceRefs": []. Such a task under an "ai_suggestion" story is "ai_suggestion".
 - Do not add stories or tasks for work the clarifications mark as out of scope.
 - When an item depends on a question in <judgment-questions>, put that question's id in its "assumptionQuestionIds". Use only ids listed there, and [] otherwise.
 - "shapedBy" lists the file names of the guidelines that shaped the item, copied exactly from the file attribute. Use [] when none did.

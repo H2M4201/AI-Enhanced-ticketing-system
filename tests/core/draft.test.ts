@@ -3,7 +3,8 @@ import type { ClarifyingQuestion, DraftItem, Resolution } from "@/core/domain";
 import type { PipelineInputs } from "@/core/pipeline/clarify";
 import { type DraftOutput, generateDraft } from "@/core/pipeline/draft";
 import { validateStructure, type ResolvedStructure } from "@/core/pipeline/structure";
-import { validateTree } from "@/core/tree";
+import { LlmOutputError } from "@/core/llm/structured";
+import { TreeError, validateTree } from "@/core/tree";
 import { fakeFromSample } from "../helpers/fake-ticketing";
 import { FakeLlm } from "../helpers/fake-llm";
 import { sampleDocuments, sampleDraftOutput } from "../helpers/sample-draft";
@@ -137,7 +138,7 @@ describe("generateDraft", () => {
 
   it("drops unknown refs and unknown shapedBy filenames", async () => {
     const reply = editedOutput((d) => {
-      d.stories[0].sourceRefs = ["requirements.md §2", "bogus §1"];
+      d.stories[0].sourceRefs = ["requirements.md §2", "bogus §1", "requirements.md §2"];
       d.stories[0].shapedBy = ["guidelines.md", "other.md"];
     });
 
@@ -151,7 +152,7 @@ describe("generateDraft", () => {
   it("collapses and caps titles, replaces empty ones and trims criteria", async () => {
     const reply = editedOutput((d) => {
       d.stories[0].title = "  Checkout:\n  guest   page  ";
-      d.stories[1].title = "x".repeat(300);
+      d.stories[1].title = "😀".repeat(300);
       d.stories[2].title = "   ";
       d.stories[0].acceptanceCriteria = ["  The guest shopper can pay.  ", "", "   "];
       d.stories[0].description = "  Line one.\nLine two.  ";
@@ -161,7 +162,7 @@ describe("generateDraft", () => {
 
     expect(byTitle(items, "Checkout: guest page").acceptanceCriteria).toEqual(["The guest shopper can pay."]);
     expect(byTitle(items, "Checkout: guest page").description).toBe("Line one.\nLine two.");
-    expect(items.find((i) => i.title === "x".repeat(255))).toBeDefined();
+    expect(items.find((i) => i.title === "😀".repeat(255))).toBeDefined();
     expect(items.find((i) => i.title === "Untitled story")).toBeDefined();
   });
 
@@ -182,5 +183,65 @@ describe("generateDraft", () => {
     expect(system).toContain("<clarifications>\n## Clarifications");
     expect(system).toContain("Q1: Can a guest save a card?");
     expect(system).toContain("Sub-task");
+  });
+
+  it("keeps a guideline-mandated task under a from_docs story as from_docs", async () => {
+    const items = await generate(sampleDraftOutput);
+
+    expect(byTitle(items, "QA: test one-page guest checkout")).toMatchObject({
+      origin: "from_docs",
+      suggestionStatus: null,
+      sourceRefs: [],
+      shapedBy: ["guidelines.md"],
+    });
+  });
+
+  it.each([
+    ["an empty", []],
+    ["an unknown", ["other.md"]],
+  ])("downgrades a task with %s shapedBy under a from_docs story to ai_suggestion", async (_label, shapedBy) => {
+    const reply = editedOutput((d) => {
+      d.stories[0].tasks[1] = { ...d.stories[0].tasks[1], origin: "from_docs", shapedBy };
+    });
+
+    const items = await generate(reply);
+
+    expect(byTitle(items, "QA: test one-page guest checkout")).toMatchObject({
+      origin: "ai_suggestion",
+      suggestionStatus: "pending",
+    });
+  });
+
+  it("keeps a task with no refs under an ai_suggestion story as ai_suggestion", async () => {
+    const reply = editedOutput((d) => {
+      d.stories[3].tasks[0] = { ...d.stories[3].tasks[0], origin: "from_docs", shapedBy: ["guidelines.md"] };
+    });
+
+    const items = await generate(reply);
+
+    expect(byTitle(items, "Checkout: show a timeout message on the payment step")).toMatchObject({
+      origin: "ai_suggestion",
+      suggestionStatus: "pending",
+    });
+  });
+
+  it("propagates a TreeError when the mapped ids collide", async () => {
+    await expect(
+      generateDraft(new FakeLlm([JSON.stringify(sampleDraftOutput)]), {
+        inputs,
+        questions,
+        resolutions,
+        structure,
+        newId: () => "same",
+      }),
+    ).rejects.toThrow(TreeError);
+  });
+
+  it("retries an empty breakdown and fails after 3 attempts", async () => {
+    const empty = JSON.stringify({ epic: { title: "Checkout Revamp", description: "" }, stories: [] });
+
+    await expect(
+      generateDraft(new FakeLlm([empty, empty, empty]), { inputs, questions, resolutions, structure, newId }),
+    ).rejects.toBeInstanceOf(LlmOutputError);
   });
 });
