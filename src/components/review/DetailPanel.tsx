@@ -25,6 +25,8 @@ type Props = {
   onRoute: (id: string, accountId: string) => void;
   /** True while typed changes wait to be saved, so the screen can hold its controls. */
   onPendingChange: (pending: boolean) => void;
+  /** True after a failed save: the fields are read-only until the draft is reloaded. */
+  frozen?: boolean;
 };
 
 /** What the inputs show. Estimate and required fields are text until they are saved. */
@@ -80,9 +82,19 @@ function Section({ title, children }: { title: string; children: React.ReactNode
  * The selected item's fields and routing. Text edits are saved 500 ms after the last keystroke,
  * and at once on blur or when the panel closes. The panel is keyed by item, so each item keeps its own draft.
  */
-export function DetailPanel({ item, status, siteUrl, requiredFields, assignableUsers, onSave, onRoute, onPendingChange }: Props) {
+export function DetailPanel({
+  item,
+  status,
+  siteUrl,
+  requiredFields,
+  assignableUsers,
+  onSave,
+  onRoute,
+  onPendingChange,
+  frozen = false,
+}: Props) {
   const required = requiredFields[item.kind];
-  const editable = canEditItem(status, item);
+  const editable = canEditItem(status, item) && !frozen;
   const [draft, setDraft] = useState(() => draftOf(item, required));
   const draftRef = useRef(draft);
   const dirty = useRef(false);
@@ -136,7 +148,11 @@ export function DetailPanel({ item, status, siteUrl, requiredFields, assignableU
         {item.createError !== null ? <p className={errorText}>{item.createError}</p> : null}
         {!editable ? (
           <p className="text-xs text-neutral-500">
-            {item.jiraKey !== null ? "This item exists in Jira, so it is read-only here." : "Read-only at this stage."}
+            {frozen
+              ? "Editing is paused until the draft is reloaded."
+              : item.jiraKey !== null
+                ? "This item exists in Jira, so it is read-only here."
+                : "Read-only at this stage."}
           </p>
         ) : null}
       </header>

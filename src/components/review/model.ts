@@ -105,8 +105,3 @@ export function countKinds(items: DraftItem[]): { epics: number; stories: number
 export function uncreated(items: DraftItem[]): DraftItem[] {
   return activeItems(items).filter((item) => item.jiraKey === null);
 }
-
-/** Active items whose last create attempt failed: what Retry would make. */
-export function failedItems(items: DraftItem[]): DraftItem[] {
-  return activeItems(items).filter((item) => item.createError !== null);
-}

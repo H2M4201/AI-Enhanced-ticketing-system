@@ -206,7 +206,7 @@ describe("ReviewScreen", () => {
     renderScreen();
     expect(await screen.findByText("User cannot be assigned")).toBeInTheDocument();
     expect(screen.getByText("Created as PROJ-2 but linking to the epic failed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /retry failed \(2\)/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry failed \(3\)/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^create \d+ tickets/i })).not.toBeInTheDocument();
   });
 
@@ -215,14 +215,14 @@ describe("ReviewScreen", () => {
     const items = sampleItems().map((i) => (i.id === "t1" ? { ...i, createError: "User cannot be assigned" } : i));
     serve(review(items, { status: "creating" }));
     renderScreen();
-    const retry = await screen.findByRole("button", { name: /retry failed \(1\)/i });
+    const retry = await screen.findByRole("button", { name: /retry failed \(4\)/i });
     expect(retry).toBeEnabled();
 
     apiFetchMock.mockImplementation(async (path) =>
       path === "/api/runs/run-1/create" ? { created: 0, failed: 1, skipped: 0 } : review(items, { status: "creating" }),
     );
     fireEvent.click(retry);
-    await waitFor(() => expect(screen.getByRole("button", { name: /retry failed \(1\)/i })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /retry failed \(4\)/i })).toBeDisabled());
     expect(screen.getByText(/retry available in 10s/i)).toBeInTheDocument();
 
     // Let the countdown's effect start its timer before the clock moves.
@@ -230,7 +230,7 @@ describe("ReviewScreen", () => {
     act(() => {
       vi.advanceTimersByTime(10_000);
     });
-    expect(screen.getByRole("button", { name: /retry failed \(1\)/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /retry failed \(4\)/i })).toBeEnabled();
   });
 
   it("a version conflict shows the server message as text and Reload re-fetches, without retrying the edit", async () => {
@@ -250,6 +250,126 @@ describe("ReviewScreen", () => {
     await waitFor(() => expect(apiFetchMock.mock.calls.length).toBeGreaterThan(gets));
     expect(apiFetchMock.mock.calls.slice(gets).every(([path, init]) => path === DRAFT && !init?.method)).toBe(true);
     expect(patchBodies()).toHaveLength(1);
+  });
+
+  it("Retry is enabled with K = the uncreated items when nothing has an error", async () => {
+    const items = sampleItems().map((i) => (i.id === "s1" ? { ...i, jiraKey: "PROJ-2" } : i));
+    serve(review(items, { status: "creating" }));
+    renderScreen();
+    expect(await screen.findByRole("button", { name: /retry failed \(3\)/i })).toBeEnabled();
+  });
+
+  it("after a conflict the edit controls are disabled and no PATCH is sent", async () => {
+    const user = userEvent.setup();
+    serve(review(sampleItems()));
+    apiFetchMock.mockImplementation(async (_path, init) => {
+      if (init?.method === "PATCH") throw new ApiError(409, "run_state", "Draft changed in another tab — reload");
+      return review(sampleItems());
+    });
+    renderScreen();
+    await user.click(await within(await screen.findByTestId("row-s2")).findByRole("button", { name: /accept/i }));
+    await screen.findByText("Draft changed in another tab — reload");
+    expect(screen.getByText("Your latest changes were not saved. Reload to continue.")).toBeInTheDocument();
+
+    expect(within(screen.getByTestId("row-s2")).getByRole("button", { name: /accept/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /create 4 tickets in jira/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /regenerate/i })).toBeDisabled();
+    await user.click(await screen.findByTestId("row-t1"));
+    expect(screen.getByRole("textbox", { name: /^title$/i })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: /change assignee/i })).toBeDisabled();
+    expect(patchBodies()).toHaveLength(1);
+  });
+
+  it("a second Retry click while a create is running sends one create", async () => {
+    const items = sampleItems().map((i) => (i.id === "t1" ? { ...i, createError: "User cannot be assigned" } : i));
+    serve(review(items, { status: "creating" }));
+    apiFetchMock.mockImplementation(async (path) =>
+      path === "/api/runs/run-1/create" ? new Promise(() => undefined) : review(items, { status: "creating" }),
+    );
+    renderScreen();
+    const retry = await screen.findByRole("button", { name: /retry failed \(4\)/i });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    const creates = apiFetchMock.mock.calls.filter(([path]) => path === "/api/runs/run-1/create");
+    expect(creates).toHaveLength(1);
+  });
+
+  it("a create failure message survives a later edit", async () => {
+    const user = userEvent.setup();
+    serve(review(sampleItems()));
+    apiFetchMock.mockImplementation(async (path, init) => {
+      if (path === "/api/runs/run-1/create") throw new ApiError(422, "invalid_edit", "Jira rejected the project");
+      if (init?.method === "PATCH") return review(sampleItems(), { draftVersion: 4 });
+      return review(sampleItems());
+    });
+    renderScreen();
+    await user.click(await screen.findByRole("button", { name: /create 4 tickets in jira/i }));
+    expect(await screen.findByText("Jira rejected the project")).toBeInTheDocument();
+    await user.click(within(await screen.findByTestId("row-s2")).getByRole("button", { name: /accept/i }));
+    await waitFor(() => expect(patchBodies()).toHaveLength(1));
+    expect(screen.getByText("Jira rejected the project")).toBeInTheDocument();
+  });
+
+  it("shows the existing epic preview with the appended clarifications and the child count", async () => {
+    serve(
+      review(sampleItems(), {
+        existingEpic: { key: "PROJ-9", summary: "Old epic" },
+        clarificationsPreview: "## Clarifications\n- Is guest checkout in scope?",
+      }),
+    );
+    renderScreen();
+    expect(await screen.findByText("Will append to PROJ-9 Old epic:")).toBeInTheDocument();
+    expect(screen.getByText(/Is guest checkout in scope/)).toBeInTheDocument();
+    expect(screen.getByText("and add 3 child tickets. Existing text and children are not changed.")).toBeInTheDocument();
+  });
+
+  it("marks a story with no routing as Needs decision", () => {
+    const items = sampleItems().map((i) => (i.id === "s1" ? { ...i, routing: null } : i));
+    render(<Tree items={items} status="review" selectedId={null} aiOnly={false} siteUrl={SITE} {...treeHandlers()} />);
+    expect(within(screen.getByTestId("row-s1")).getByText("Needs decision")).toBeInTheDocument();
+    expect(within(screen.getByTestId("row-s2")).queryByText("Needs decision")).not.toBeInTheDocument();
+  });
+
+  it("picking a blocker selects its item and closes the popover", async () => {
+    const user = userEvent.setup();
+    serve(
+      review(sampleItems(), {
+        blockers: [{ itemId: "t1", type: "needs_routing", message: '"Guest session API" needs an assignee' }],
+      }),
+    );
+    renderScreen();
+    await user.click(await screen.findByRole("button", { name: /1 blocker/i }));
+    await user.click(screen.getByRole("button", { name: '"Guest session API" needs an assignee' }));
+    expect(screen.getByRole("textbox", { name: /^title$/i })).toHaveValue("Guest session API");
+    expect(screen.queryByRole("list", { name: /blockers/i })).not.toBeInTheDocument();
+  });
+
+  it("the AI filter keeps AI suggestions with their ancestors and hides other items", async () => {
+    const user = userEvent.setup();
+    serve(review(sampleItems()));
+    renderScreen();
+    await user.click(await screen.findByRole("button", { name: /filter: ai suggestions/i }));
+    expect(screen.getByRole("button", { name: /filter: ai suggestions/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("row-s1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("row-t1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("row-e1")).toBeInTheDocument();
+    expect(screen.getByTestId("row-s2")).toBeInTheDocument();
+  });
+
+  it("picking a blocker that the AI filter hides turns the filter off", async () => {
+    const user = userEvent.setup();
+    serve(
+      review(sampleItems(), {
+        blockers: [{ itemId: "t1", type: "needs_routing", message: '"Guest session API" needs an assignee' }],
+      }),
+    );
+    renderScreen();
+    await user.click(await screen.findByRole("button", { name: /filter: ai suggestions/i }));
+    expect(screen.queryByTestId("row-t1")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /1 blocker/i }));
+    await user.click(screen.getByRole("button", { name: '"Guest session API" needs an assignee' }));
+    expect(screen.getByTestId("row-t1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /filter: ai suggestions/i })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("saves a title on blur, and not before", async () => {

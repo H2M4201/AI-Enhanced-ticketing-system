@@ -23,7 +23,7 @@ type Props = {
   onPickBlocker: (itemId: string) => void;
   /** Tickets Create would make. */
   createCount: number;
-  /** Failed items Retry would make. */
+  /** Items Retry would create: every active item without a Jira key. */
   retryCount: number;
   /** Seconds left before Retry is allowed after a failed create. Zero when it is allowed. */
   retryWaitSeconds: number;

@@ -5,8 +5,8 @@ import { DetailPanel, type ItemPatch } from "@/components/review/DetailPanel";
 import {
   canRegenerate,
   countKinds,
+  aiFilterIds,
   descendantIds,
-  failedItems,
   keyUrl,
   uncreated,
   validParentsFor,
@@ -29,7 +29,8 @@ const REGENERATE_CONFIRM =
 
 const PANEL = "rounded-lg border border-neutral-200 bg-white p-4 shadow-sm";
 
-type Failure = { message: string; reload: boolean };
+/** A failed call. A failed save is unsaved: the edit did not reach the draft, so the screen must reload. */
+type Failure = { message: string; reload: boolean; unsaved: boolean };
 
 type Confirm =
   | { kind: "regenerate" }
@@ -70,6 +71,8 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
   const chain = useRef<Promise<void>>(Promise.resolve());
   /** Set by a failed save. Queued saves are dropped until a reload clears it. */
   const blocked = useRef(false);
+  /** Set while a create runs, so a second click cannot send a second create. */
+  const creating = useRef(false);
 
   /** Takes a review from the server. The selection is kept only while its item still exists. */
   const adopt = useCallback((next: ReviewView) => {
@@ -126,7 +129,7 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
           setFailure((current) => (current?.reload ? null : current));
           adoptFresh(next);
         } catch (error) {
-          setFailure({ message: errorMessage(error), reload: true });
+          setFailure({ message: errorMessage(error), reload: true, unsaved: false });
         }
       }),
     [queue, runId, adoptFresh],
@@ -136,7 +139,8 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
   const save = useCallback(
     (op: DraftOp) => {
       if (blocked.current) return;
-      setFailure(null);
+      // Only a failed save is cleared by a new edit. A create failure stays until a reload.
+      setFailure((current) => (current?.unsaved ? null : current));
       setPendingSaves((count) => count + 1);
       void queue(async () => {
         try {
@@ -148,7 +152,7 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
           adopt(next);
         } catch (error) {
           blocked.current = true;
-          setFailure({ message: errorMessage(error), reload: true });
+          setFailure({ message: errorMessage(error), reload: true, unsaved: true });
         } finally {
           setPendingSaves((count) => count - 1);
         }
@@ -174,6 +178,8 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
   }
 
   async function createTickets() {
+    if (creating.current) return;
+    creating.current = true;
     setBusyLabel("Creating tickets in Jira…");
     setFailure(null);
     try {
@@ -183,9 +189,10 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
     } catch (error) {
       startRetryWait();
       const conflict = error instanceof ApiError && error.code === "run_state";
-      setFailure({ message: errorMessage(error), reload: conflict });
+      setFailure({ message: errorMessage(error), reload: conflict, unsaved: false });
       if (!conflict) await reloadReview();
     } finally {
+      creating.current = false;
       setBusyLabel(null);
       onRunChanged();
     }
@@ -200,7 +207,11 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
       blocked.current = false;
       adoptFresh(next);
     } catch (error) {
-      setFailure({ message: errorMessage(error), reload: error instanceof ApiError && error.code === "run_state" });
+      setFailure({
+        message: errorMessage(error),
+        reload: error instanceof ApiError && error.code === "run_state",
+        unsaved: false,
+      });
     } finally {
       setBusyLabel(null);
     }
@@ -230,9 +241,10 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const epic = items.find((item) => item.kind === "epic") ?? null;
   const toCreate = uncreated(items);
-  const failedCount = failedItems(items).length;
+  /** After a failed save the draft is stale: nothing may be edited until a reload. */
+  const frozen = failure?.reload === true;
   /** Saves, creates and regenerates hold the controls: a pending save must not race a create. */
-  const locked = busyLabel !== null || pendingSaves > 0 || textPending || failure?.reload === true;
+  const locked = busyLabel !== null || pendingSaves > 0 || textPending || frozen;
   const childTickets = toCreate.filter((item) => item.kind !== "epic").length;
 
   function askDelete(id: string) {
@@ -261,24 +273,30 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
         blockersOpen={blockersOpen}
         onToggleBlockers={() => setBlockersOpen((value) => !value)}
         onPickBlocker={(itemId) => {
+          // An item the AI filter hides would not show as selected, so the filter goes off first.
+          const shown = aiFilterIds(items, aiOnly);
+          if (shown !== null && !shown.has(itemId)) setAiOnly(false);
           setSelectedId(itemId);
           setBlockersOpen(false);
         }}
         createCount={toCreate.length}
-        retryCount={failedCount}
+        retryCount={toCreate.length}
         retryWaitSeconds={retryWait}
         busy={locked}
         onCreate={() => void createTickets()}
       />
 
       {failure !== null ? (
-        <div role="alert" className={`${errorText} flex flex-wrap items-center justify-between gap-3`}>
-          <span>{failure.message}</span>
-          {failure.reload ? (
-            <button type="button" className={secondaryButton} onClick={() => void reloadReview()}>
-              Reload
-            </button>
-          ) : null}
+        <div role="alert" className={`${errorText} sticky top-0 z-10 flex flex-col gap-2 shadow-sm`}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{failure.message}</span>
+            {failure.reload ? (
+              <button type="button" className={secondaryButton} onClick={() => void reloadReview()}>
+                Reload
+              </button>
+            ) : null}
+          </div>
+          {failure.unsaved ? <p>Your latest changes were not saved. Reload to continue.</p> : null}
         </div>
       ) : null}
 
@@ -311,6 +329,7 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
             onAdd={onAdd}
             onMove={askMove}
             onDelete={askDelete}
+            frozen={frozen}
           />
         </section>
 
@@ -326,6 +345,7 @@ export function ReviewScreen({ runId, siteUrl, onRunChanged }: Props) {
               onSave={onSave}
               onRoute={onRoute}
               onPendingChange={setTextPending}
+              frozen={frozen}
             />
           ) : (
             <p className="text-sm text-neutral-600">Select an item in the tree to see and edit it.</p>

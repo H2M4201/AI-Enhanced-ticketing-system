@@ -27,6 +27,8 @@ type Props = {
   onAdd: (parentId: string, kind: "story" | "task") => void;
   onMove: (id: string) => void;
   onDelete: (id: string) => void;
+  /** True after a failed save: every action is disabled until the draft is reloaded. */
+  frozen?: boolean;
 };
 
 type RowProps = Omit<Props, "items" | "aiOnly" | "selectedId"> & {
@@ -38,7 +40,7 @@ type RowProps = Omit<Props, "items" | "aiOnly" | "selectedId"> & {
   canMove: boolean;
 };
 
-function TreeRow({ item, depth, greyed, selected, canMove, status, siteUrl, onSelect, onSuggestion, onAdd, onMove, onDelete }: RowProps) {
+function TreeRow({ item, depth, greyed, selected, canMove, frozen, status, siteUrl, onSelect, onSuggestion, onAdd, onMove, onDelete }: RowProps) {
   const rejected = item.suggestionStatus === "rejected";
   const dimmed = greyed || rejected;
   const structure = canChangeStructure(status);
@@ -72,32 +74,32 @@ function TreeRow({ item, depth, greyed, selected, canMove, status, siteUrl, onSe
 
       {isAi && item.suggestionStatus === "pending" && structure ? (
         <span className="flex gap-1">
-          <button type="button" className={ROW_BUTTON} onClick={() => onSuggestion(item.id, "accepted")}>
+          <button type="button" className={ROW_BUTTON} disabled={frozen} onClick={() => onSuggestion(item.id, "accepted")}>
             ✓ Accept
           </button>
-          <button type="button" className={ROW_BUTTON} onClick={() => onSuggestion(item.id, "rejected")}>
+          <button type="button" className={ROW_BUTTON} disabled={frozen} onClick={() => onSuggestion(item.id, "rejected")}>
             ✕ Reject
           </button>
         </span>
       ) : null}
       {isAi && rejected && !greyed && structure ? (
-        <button type="button" className={ROW_BUTTON} onClick={() => onSuggestion(item.id, "accepted")}>
+        <button type="button" className={ROW_BUTTON} disabled={frozen} onClick={() => onSuggestion(item.id, "accepted")}>
           Undo
         </button>
       ) : null}
 
       {structure && item.jiraKey === null && !dimmed && child ? (
-        <button type="button" className={ROW_BUTTON} onClick={() => onAdd(item.id, child)} aria-label={`Add ${child} under ${item.title}`}>
+        <button type="button" className={ROW_BUTTON} disabled={frozen} onClick={() => onAdd(item.id, child)} aria-label={`Add ${child} under ${item.title}`}>
           + {child === "story" ? "Story" : "Task"}
         </button>
       ) : null}
       {structure && item.jiraKey === null && !dimmed && item.kind !== "epic" && canMove ? (
-        <button type="button" className={ROW_BUTTON} onClick={() => onMove(item.id)}>
+        <button type="button" className={ROW_BUTTON} disabled={frozen} onClick={() => onMove(item.id)}>
           Move to…
         </button>
       ) : null}
       {structure && item.jiraKey === null && item.kind !== "epic" ? (
-        <button type="button" className={ROW_BUTTON} onClick={() => onDelete(item.id)}>
+        <button type="button" className={ROW_BUTTON} disabled={frozen} onClick={() => onDelete(item.id)}>
           Delete
         </button>
       ) : null}
@@ -108,7 +110,7 @@ function TreeRow({ item, depth, greyed, selected, canMove, status, siteUrl, onSe
 }
 
 /** The draft as an indented tree: each row shows its title, then its tags and actions. */
-export function Tree({ items, status, selectedId, aiOnly, siteUrl, onSelect, onSuggestion, onAdd, onMove, onDelete }: Props) {
+export function Tree({ items, status, selectedId, aiOnly, siteUrl, onSelect, onSuggestion, onAdd, onMove, onDelete, frozen = false }: Props) {
   const children = childrenByParent(items);
   const visible = aiFilterIds(items, aiOnly);
   const rows: ReactNode[] = [];
@@ -124,6 +126,7 @@ export function Tree({ items, status, selectedId, aiOnly, siteUrl, onSelect, onS
           greyed={greyed}
           selected={item.id === selectedId}
           canMove={validParentsFor(items, item).length > 0}
+          frozen={frozen}
           status={status}
           siteUrl={siteUrl}
           onSelect={onSelect}
