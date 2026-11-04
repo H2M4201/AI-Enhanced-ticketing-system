@@ -4,6 +4,17 @@ import { assertUuid, runFor } from "@/server/route-access";
 
 export const runtime = "nodejs";
 
+/** One document's parsed sections, for the extracted-text view. */
+export async function GET(_request: Request, { params }: { params: Promise<{ id: string; docId: string }> }) {
+  return handle(async () => {
+    const user = await requireUser();
+    const { id, docId } = await params;
+    const { service, run } = await runFor(id, user);
+    assertUuid(docId, "Document");
+    return service.getDocument(run.id, docId);
+  }, "runs.documents.get");
+}
+
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string; docId: string }> }) {
   return handle(async () => {
     const user = await requireUser();

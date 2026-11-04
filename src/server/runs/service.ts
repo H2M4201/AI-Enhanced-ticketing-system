@@ -330,7 +330,7 @@ export class RunService {
     return next;
   }
 
-  /** The run page's stored state: status, documents, the saved check results and the questions. The epic text is not included. */
+  /** The run page's stored state: status, epic text, documents, the saved check results and the questions. */
   async getRunDetail(runId: string) {
     const { db } = this.deps;
     const run = await getRun(db, runId);
@@ -341,6 +341,7 @@ export class RunService {
         id: run.id,
         projectId: run.projectId,
         status: run.status,
+        epicText: run.epicText,
         existingEpicKey: run.existingEpicKey,
         clarificationsWritten: run.clarificationsWritten,
         draftVersion: run.draftVersion,
@@ -350,6 +351,13 @@ export class RunService {
       checks: { structure: run.structure, roster: run.roster, assignableUsers: run.assignableUsers },
       questions: questions.map((entry) => ({ ...entry.question, resolution: entry.resolution })),
     };
+  }
+
+  /** One document's parsed sections, for the extracted-text view. Sections are null once the retention purge has removed them. */
+  async getDocument(runId: string, docId: string) {
+    const document = (await listDocuments(this.deps.db, runId)).find((doc) => doc.id === docId);
+    if (!document) throw new NotFoundError("Document");
+    return { id: document.id, filename: document.filename, kind: document.kind, sections: document.sections };
   }
 
   async getReview(runId: string): Promise<ReviewView> {

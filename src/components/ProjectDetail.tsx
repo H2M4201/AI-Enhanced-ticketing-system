@@ -64,7 +64,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             {canEdit ? "" : " · shared with you"}
           </p>
         </div>
-        <Link href={`/projects/${project.id}/runs/new`} className={primaryButton}>
+        <Link href={`/runs/new?project=${project.id}`} className={primaryButton}>
           Start a new breakdown
         </Link>
       </div>
