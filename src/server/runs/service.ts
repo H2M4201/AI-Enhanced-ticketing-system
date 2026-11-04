@@ -412,11 +412,34 @@ export class RunService {
       safeLog("run.tickets", { runId, count: summary.created, status: complete ? "done" : "creating" });
       return summary;
     } catch (error) {
-      // Nothing was created when a blocker appears inside the claim, so the run returns to review for fixing.
-      if (error instanceof CreateBlockedError) await updateRun(db, runId, { status: "review" });
+      await this.settleFailedCreation(runId);
       throw error;
     } finally {
-      await releaseCreation(db, runId);
+      await this.releaseLock(runId);
+    }
+  }
+
+  /**
+   * After a failure, returns the run to review when no ticket was created, so the reviewer keeps
+   * the review-only operations. A run that already has created tickets stays creating for Retry.
+   * Never throws: the original error is what the caller needs to see.
+   */
+  private async settleFailedCreation(runId: string): Promise<void> {
+    try {
+      const { db } = this.deps;
+      if (activeItems(await loadDraft(db, runId)).some((item) => item.jiraKey !== null)) return;
+      await updateRun(db, runId, { status: "review" });
+    } catch {
+      safeLog("run.settle_failed", { runId, errorCode: "settle_failed" });
+    }
+  }
+
+  /** Clears the creation lock. A failure is logged, so it cannot replace the error that ended the creation. */
+  private async releaseLock(runId: string): Promise<void> {
+    try {
+      await releaseCreation(this.deps.db, runId);
+    } catch {
+      safeLog("run.release_failed", { runId, errorCode: "release_failed" });
     }
   }
 }

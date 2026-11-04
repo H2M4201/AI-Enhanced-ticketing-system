@@ -451,4 +451,45 @@ describe("RunService", () => {
 
     expect(titled((await svc.getReview(run.id)).items, "Tab A").id).toBe(story.id);
   });
+
+  it("an adapter failure before any create returns the run to review, releases the lock and rethrows", async () => {
+    const { db, user, run } = await reviewedRun();
+    const fake = fakeFromSample();
+    const failing = serviceWith(db, new FakeLlm([]), fake, {
+      adapterFor: async () => {
+        throw new Error("Jira auth expired");
+      },
+    });
+
+    await expect(failing.createTickets(user.id, run.id)).rejects.toThrow("Jira auth expired");
+
+    const after = await getRun(db, run.id);
+    expect(after.status).toBe("review");
+    expect(after.creatingSince).toBeNull();
+    expect(fake.issues).toHaveLength(0);
+  });
+
+  it("a failed lock release is logged and does not hide the original error", async () => {
+    const { db, user, run } = await reviewedRun();
+    const failing = serviceWith(db, new FakeLlm([]), fakeFromSample(), {
+      adapterFor: async () => {
+        throw new Error("Jira auth expired");
+      },
+    });
+    // Fail only the statement that clears the lock.
+    const original = db.update.bind(db);
+    vi.spyOn(db, "update").mockImplementation(((table: Parameters<typeof db.update>[0]) => {
+      const builder = original(table) as unknown as { set: (values: Record<string, unknown>) => unknown };
+      const set = builder.set.bind(builder);
+      builder.set = (values: Record<string, unknown>) => {
+        if (values.creatingSince === null) throw new Error("connection lost");
+        return set(values);
+      };
+      return builder;
+    }) as unknown as typeof db.update);
+
+    await expect(failing.createTickets(user.id, run.id)).rejects.toThrow("Jira auth expired");
+    expect(process.stdout.write).toHaveBeenCalledWith(expect.stringContaining('"event":"run.release_failed"'));
+    expect(process.stdout.write).toHaveBeenCalledWith(expect.stringContaining(`"runId":"${run.id}"`));
+  });
 });
