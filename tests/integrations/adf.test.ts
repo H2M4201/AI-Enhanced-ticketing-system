@@ -23,4 +23,16 @@ describe("ADF helpers", () => {
   it("marker footer round-trips", () => {
     expect(readMarker("body\n\n" + markerFooter("abc"))).toBe("abc");
   });
+
+  it("splits CRLF line endings without leaving \\r in text nodes", () => {
+    const doc = textToAdf("## Heading\r\nPara one\r\n- item");
+    expect(JSON.stringify(doc)).not.toContain("\\r");
+    expect(adfToText(doc)).toBe("## Heading\nPara one\n- item");
+  });
+
+  it("skips a heading line with no text instead of emitting an empty text node", () => {
+    const doc = textToAdf("## \nBody");
+    expect(doc.content).toEqual([{ type: "paragraph", content: [{ type: "text", text: "Body" }] }]);
+    expect(JSON.stringify(doc)).not.toContain('"text":""');
+  });
 });

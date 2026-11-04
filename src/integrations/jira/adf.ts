@@ -32,7 +32,7 @@ export function textToAdf(text: string): AdfDoc {
     list.content!.push({ type: "listItem", content: [paragraph(itemText)] });
   };
 
-  for (const line of text.split("\n")) {
+  for (const line of text.split(/\r?\n/)) {
     if (line.startsWith("- [ ] ")) {
       bullet(CHECKBOX_OPEN + line.slice(6));
       continue;
@@ -43,9 +43,9 @@ export function textToAdf(text: string): AdfDoc {
     }
     list = null;
     if (line.startsWith("### ")) {
-      content.push({ type: "heading", attrs: { level: 3 }, content: [{ type: "text", text: line.slice(4) }] });
+      if (line.length > 4) content.push({ type: "heading", attrs: { level: 3 }, content: [{ type: "text", text: line.slice(4) }] });
     } else if (line.startsWith("## ")) {
-      content.push({ type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: line.slice(3) }] });
+      if (line.length > 3) content.push({ type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: line.slice(3) }] });
     } else {
       content.push(paragraph(line));
     }
