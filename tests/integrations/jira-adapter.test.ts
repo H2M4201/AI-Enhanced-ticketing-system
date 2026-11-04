@@ -11,7 +11,7 @@ type Call = {
   body: any;
   auth: string | null;
 };
-type Reply = { status?: number; body?: unknown };
+type Reply = { status?: number; body?: unknown; raw?: string };
 type Route = (call: Call) => Reply | undefined;
 
 /** Fake fetch: routes by method + path relative to the cloud base URL. No network. */
@@ -30,6 +30,7 @@ function fakeJira(route: Route) {
     const reply = route(call);
     if (!reply) throw new Error(`Unrouted ${call.method} ${call.path}`);
     const status = reply.status ?? 200;
+    if (reply.raw !== undefined) return new Response(reply.raw, { status });
     if (status === 204 || reply.body === undefined) return new Response(null, { status });
     return new Response(JSON.stringify(reply.body), {
       status,
@@ -187,6 +188,84 @@ describe("JiraCloudAdapter issues", () => {
     expect(r[2]).toEqual({ clientRef: "c2", ok: true, key: "CHK-3" });
     expect(r[4]).toEqual({ clientRef: "c4", ok: true, key: "CHK-4" });
     expect(r[50]).toEqual({ clientRef: "c50", ok: true, key: "CHK-50" });
+  });
+
+  it("maps a 400 where every element failed to per-item errors", async () => {
+    const { adapter } = setup((c) => {
+      if (c.path !== "/rest/api/3/issue/bulk") return undefined;
+      return {
+        status: 400,
+        body: {
+          issues: [],
+          errors: [
+            { status: 400, failedElementNumber: 0, elementErrors: { errorMessages: [], errors: { assignee: "Assignee is not valid" } } },
+            { status: 400, failedElementNumber: 1, elementErrors: { errorMessages: ["Could not create"], errors: { summary: "Summary too long" } } },
+            { status: 400, failedElementNumber: 2, elementErrors: { errorMessages: ["Could not create"], errors: {} } },
+          ],
+        },
+      };
+    });
+    const r = await adapter.createIssues([issue("c0"), issue("c1"), issue("c2")]);
+    expect(r).toEqual([
+      { clientRef: "c0", ok: false, error: "Assignee is not valid" },
+      { clientRef: "c1", ok: false, error: "Could not create; Summary too long" },
+      { clientRef: "c2", ok: false, error: "Could not create" },
+    ]);
+  });
+
+  it("keeps chunk 1 results when chunk 2 is a 400 where every element failed", async () => {
+    let key = 0;
+    const { adapter } = setup((c) => {
+      if (c.path !== "/rest/api/3/issue/bulk") return undefined;
+      if (c.body.issueUpdates.length === 50) {
+        return {
+          status: 201,
+          body: {
+            issues: range(50).map(() => ({ id: "x", key: `CHK-${++key}`, self: "x" })),
+            errors: [],
+          },
+        };
+      }
+      return {
+        status: 400,
+        body: {
+          issues: [],
+          errors: [{ status: 400, failedElementNumber: 0, elementErrors: { errorMessages: ["Summary is required"], errors: {} } }],
+        },
+      };
+    });
+    const r = await adapter.createIssues(range(51).map((i) => issue(`c${i}`)));
+    expect(r).toHaveLength(51);
+    expect(r.slice(0, 50).every((x) => x.ok)).toBe(true);
+    expect(r[0]).toEqual({ clientRef: "c0", ok: true, key: "CHK-1" });
+    expect(r[50]).toEqual({ clientRef: "c50", ok: false, error: "Summary is required" });
+  });
+
+  it("keeps chunk 1 results and fails the rest without throwing when chunk 2 is a 500", async () => {
+    let key = 0;
+    const { adapter } = setup((c) => {
+      if (c.path !== "/rest/api/3/issue/bulk") return undefined;
+      if (c.body.issueUpdates.length === 50) {
+        return {
+          status: 201,
+          body: { issues: range(50).map(() => ({ id: "x", key: `CHK-${++key}`, self: "x" })), errors: [] },
+        };
+      }
+      return { status: 500, body: { errorMessages: ["Server down"], errors: {} } };
+    });
+    const r = await adapter.createIssues(range(51).map((i) => issue(`c${i}`)));
+    expect(r).toHaveLength(51);
+    expect(r.slice(0, 50).every((x) => x.ok)).toBe(true);
+    expect(r[50]).toEqual({ clientRef: "c50", ok: false, error: "Server down" });
+  });
+
+  it("throws JiraError when the first chunk is forbidden", async () => {
+    const { adapter } = setup((c) =>
+      c.path === "/rest/api/3/issue/bulk" ? { status: 403, body: { errorMessages: ["No permission"], errors: {} } } : undefined,
+    );
+    const err = await adapter.createIssues([issue("c0")]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JiraError);
+    expect(err).toMatchObject({ status: 403, messages: ["No permission"] });
   });
 
   it("sends the bulk create fields with parent, assignee and components when given", async () => {
@@ -369,6 +448,21 @@ describe("JiraHttp", () => {
     const err = await adapter.linkIssues("CHK-1", "CHK-2", "Nope").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(JiraError);
     expect(err).toMatchObject({ status: 400, messages: ["Bad link", "Unknown link type"] });
+  });
+
+  it("throws JiraError for a 2xx response with a non-JSON body", async () => {
+    const { adapter } = setup((c) => (c.path === "/rest/api/3/project/CHK" ? { raw: "<html>oops</html>" } : undefined));
+    const err = await adapter.getProjectMeta("CHK").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JiraError);
+    expect(err).toMatchObject({ status: 200, messages: ["Invalid JSON response from Jira"] });
+  });
+
+  it("keeps the parsed body on JiraError", async () => {
+    const body = { issues: [], errors: [{ status: 400, failedElementNumber: 0, elementErrors: { errorMessages: ["Summary is required"], errors: {} } }] };
+    const { adapter } = setup((c) => (c.path === "/rest/api/3/issueLink" ? { status: 400, body } : undefined));
+    const err = await adapter.linkIssues("CHK-1", "CHK-2", "Blocks").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(JiraError);
+    expect(err).toMatchObject({ status: 400, body, messages: ["Summary is required"] });
   });
 
   it("returns undefined for a 204 response", async () => {

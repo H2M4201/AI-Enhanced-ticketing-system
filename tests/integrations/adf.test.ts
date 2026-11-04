@@ -30,6 +30,11 @@ describe("ADF helpers", () => {
     expect(adfToText(doc)).toBe("## Heading\nPara one\n- item");
   });
 
+  it("skips an empty ### heading too", () => {
+    const doc = textToAdf("### \nBody");
+    expect(doc.content).toEqual([{ type: "paragraph", content: [{ type: "text", text: "Body" }] }]);
+  });
+
   it("skips a heading line with no text instead of emitting an empty text node", () => {
     const doc = textToAdf("## \nBody");
     expect(doc.content).toEqual([{ type: "paragraph", content: [{ type: "text", text: "Body" }] }]);

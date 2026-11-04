@@ -92,6 +92,28 @@ function elementErrorText(e: BulkElementError): string {
   return parts.length > 0 ? parts.join("; ") : `Jira rejected this item (status ${e.status})`;
 }
 
+function hasErrorList(body: unknown): body is BulkCreateResponse {
+  return typeof body === "object" && body !== null && Array.isArray((body as { errors?: unknown }).errors);
+}
+
+/** Maps a bulk response (2xx, or a 400 carrying the same shape) back to the chunk's clientRefs. */
+function mapBulkResponse(chunk: NewIssue[], res: BulkCreateResponse): CreateResult[] {
+  const failures = new Map<number, string>();
+  for (const e of res.errors ?? []) failures.set(e.failedElementNumber, elementErrorText(e));
+
+  // Successful issues come back in input order, skipping the failed elements.
+  const created = res.issues ?? [];
+  let nextCreated = 0;
+  return chunk.map((item, index): CreateResult => {
+    const failure = failures.get(index);
+    if (failure !== undefined) return { clientRef: item.clientRef, ok: false, error: failure };
+    const made = created[nextCreated++];
+    return made
+      ? { clientRef: item.clientRef, ok: true, key: made.key }
+      : { clientRef: item.clientRef, ok: false, error: "Jira did not return an issue for this item" };
+  });
+}
+
 function isNotFound(err: unknown): boolean {
   return err instanceof JiraError && err.status === 404;
 }
@@ -148,7 +170,19 @@ export class JiraCloudAdapter implements TicketingAdapter {
   async createIssues(issues: NewIssue[]): Promise<CreateResult[]> {
     const results: CreateResult[] = [];
     for (let i = 0; i < issues.length; i += BULK_CHUNK) {
-      results.push(...(await this.createChunk(issues.slice(i, i + BULK_CHUNK))));
+      try {
+        results.push(...(await this.createChunk(issues.slice(i, i + BULK_CHUNK))));
+      } catch (err) {
+        if (!(err instanceof JiraError)) throw err;
+        // Nothing created yet and not authorized: let the caller prompt re-authentication.
+        const authFailure = results.length === 0 && (err.status === 401 || err.status === 403);
+        if (authFailure) throw err;
+        // Keep earlier chunks' results; the rest of the items fail with this chunk-level message.
+        for (const item of issues.slice(i)) {
+          results.push({ clientRef: item.clientRef, ok: false, error: err.message });
+        }
+        return results;
+      }
     }
     return results;
   }
@@ -220,23 +254,20 @@ export class JiraCloudAdapter implements TicketingAdapter {
   }
 
   private async createChunk(chunk: NewIssue[]): Promise<CreateResult[]> {
-    const res = await this.http.request<BulkCreateResponse>("POST", "/rest/api/3/issue/bulk", {
-      issueUpdates: chunk.map(toIssueUpdate),
-    });
-    const failures = new Map<number, string>();
-    for (const e of res.errors ?? []) failures.set(e.failedElementNumber, elementErrorText(e));
-
-    // Successful issues come back in input order, skipping the failed elements.
-    const created = res.issues ?? [];
-    let nextCreated = 0;
-    return chunk.map((item, index): CreateResult => {
-      const failure = failures.get(index);
-      if (failure !== undefined) return { clientRef: item.clientRef, ok: false, error: failure };
-      const made = created[nextCreated++];
-      return made
-        ? { clientRef: item.clientRef, ok: true, key: made.key }
-        : { clientRef: item.clientRef, ok: false, error: "Jira did not return an issue for this item" };
-    });
+    let res: BulkCreateResponse;
+    try {
+      res = await this.http.request<BulkCreateResponse>("POST", "/rest/api/3/issue/bulk", {
+        issueUpdates: chunk.map(toIssueUpdate),
+      });
+    } catch (err) {
+      // Jira answers 400 with the same shape when every element in the request fails.
+      if (err instanceof JiraError && err.status === 400 && hasErrorList(err.body)) {
+        res = err.body;
+      } else {
+        throw err;
+      }
+    }
+    return mapBulkResponse(chunk, res);
   }
 
   private async requiredFields(projectKey: string, issueTypeId: string): Promise<{ key: string; name: string }[]> {
