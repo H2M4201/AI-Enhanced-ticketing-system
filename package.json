@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "samples": "tsx scripts/build-samples.ts",
-    "eval": "tsx scripts/eval.ts"
+    "eval": "tsx scripts/eval.ts",
+    "backdate": "tsx scripts/backdate-run.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.84",

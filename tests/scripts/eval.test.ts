@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { evaluate, reportFileName } from "../../scripts/eval";
+import type { ClarifyingQuestion } from "@/core/domain";
+import { evaluate, FIXED_FAILURE_MESSAGE, plantedFlaws, reportFileName } from "../../scripts/eval";
 import { FakeLlm } from "../helpers/fake-llm";
 import { sampleDraftOutput } from "../helpers/sample-draft";
 
@@ -116,6 +117,7 @@ describe("evaluate", () => {
     expect(report.steps.every((step) => step.ok)).toBe(true);
     expect(report.plantedFlawsFound).toEqual({ contradiction: true, ambiguity: true, gap: true });
     expect(report.created).toBe(report.items.stories + report.items.tasks + 1);
+    expect(report.failed).toBe(0);
     expect(report.routing.assigned + report.routing.needsDecision).toBe(report.items.stories + report.items.tasks);
   });
 
@@ -125,6 +127,71 @@ describe("evaluate", () => {
     const json = JSON.stringify(await evaluate(llm, SAMPLE_DIR), null, 2);
 
     for (const phrase of DOCUMENT_PHRASES) expect(json).not.toContain(phrase);
+  });
+});
+
+function question(category: ClarifyingQuestion["category"], text: string, sourceRefs: string[]): ClarifyingQuestion {
+  return { id: "Q1", category, text, sourceRefs, rank: 1 };
+}
+
+const FLAW_QUESTIONS: ClarifyingQuestion[] = [
+  question("contradiction", "Guest save or account only?", ["requirements.docx §2.1", "requirements.docx §3.2"]),
+  question("ambiguity", "What counts as fast?", ["requirements.docx §1"]),
+  question("missing", "What happens on payment timeout?", ["requirements.docx §5"]),
+];
+
+describe("plantedFlaws", () => {
+  it("finds all three flaws when the questions cite them correctly", () => {
+    expect(plantedFlaws(FLAW_QUESTIONS)).toEqual({ contradiction: true, ambiguity: true, gap: true });
+  });
+
+  it.each([
+    ["the contradiction does not cite §2.1 or §3.2", [question("contradiction", "Guest save?", ["requirements.docx §2"])], "contradiction"],
+    ["the §2.1 question is not a contradiction", [question("ambiguity", "Guest save?", ["requirements.docx §2.1"])], "contradiction"],
+    ["the ambiguity does not cite §1", [question("ambiguity", "What counts as fast?", ["requirements.docx §2"])], "ambiguity"],
+    ["the §1 question is not an ambiguity", [question("missing", "What counts as fast?", ["requirements.docx §1"])], "ambiguity"],
+    ["the gap question has no timeout or fail text", [question("missing", "Which shipping methods?", ["requirements.docx §5"])], "gap"],
+    ["the timeout question is not a missing-information question", [question("ambiguity", "Timeout handling?", ["requirements.docx §5"])], "gap"],
+  ])("reports the flaw as not found when %s", (_case, questions, flaw) => {
+    const found = plantedFlaws(questions);
+    expect(found[flaw as keyof typeof found]).toBe(false);
+  });
+});
+
+describe("evaluate error path", () => {
+  const SECRET_SENTENCE = "Canary sentence: the model said the private wording here.";
+  /** Everything a leak could carry: the canary, the sample phrases and the distinctive reply text. */
+  const LEAK_TEXT = [SECRET_SENTENCE, ...DOCUMENT_PHRASES, "What counts as fast?", "Payment timeout handling"];
+
+  it("records a thrown draft error by name and fixed message, without its text", async () => {
+    const llm = new FakeLlm([
+      STRUCTURE_REPLY,
+      ROSTER_REPLY,
+      CLARIFY_REPLY,
+      () => {
+        throw new Error(LEAK_TEXT.join(" "));
+      },
+    ]);
+
+    const report = await evaluate(llm, SAMPLE_DIR);
+    const json = JSON.stringify(report, null, 2);
+
+    const draft = report.steps.find((step) => step.name === "draft");
+    expect(draft).toEqual({ name: "draft", ok: false, durationMs: expect.any(Number), error: `Error: ${FIXED_FAILURE_MESSAGE}` });
+    expect(report.steps.at(-1)?.name).toBe("draft");
+    for (const text of LEAK_TEXT) expect(json).not.toContain(text);
+  });
+
+  it("records unusable model output as LlmOutputError without its text", async () => {
+    const unusable = () => `Not JSON at all. ${LEAK_TEXT.join(" ")}`;
+    const llm = new FakeLlm([STRUCTURE_REPLY, ROSTER_REPLY, CLARIFY_REPLY, unusable, unusable, unusable]);
+
+    const report = await evaluate(llm, SAMPLE_DIR);
+    const json = JSON.stringify(report, null, 2);
+
+    const draft = report.steps.find((step) => step.name === "draft");
+    expect(draft).toEqual({ name: "draft", ok: false, durationMs: expect.any(Number), error: `LlmOutputError: ${FIXED_FAILURE_MESSAGE}` });
+    for (const text of LEAK_TEXT) expect(json).not.toContain(text);
   });
 });
 

@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import type { ClarifyingQuestion, DraftItem, ParsedDocument, Resolution, Roster } from "@/core/domain";
 import { parseDocument } from "@/core/ingest/parse";
 import { createLlmClient, type LlmClient, type ProviderConfig } from "@/core/llm/client";
@@ -39,6 +39,7 @@ export type EvalReport = {
   items: { stories: number; tasks: number; suggestions: number };
   routing: { assigned: number; needsDecision: number };
   created: number;
+  failed: number;
 };
 
 const SAMPLE_DOCUMENTS = ["requirements.docx", "design.pptx", "api-spec.pdf"];
@@ -47,7 +48,7 @@ const GUIDELINES_FILE = "guidelines.md";
 const ROUTING_FILE = "routing.md";
 const DEFAULT_CONTEXT_TOKENS = 128000;
 const QA_TEAM = "QA";
-const FIXED_FAILURE_MESSAGE = "step failed; details withheld so that no document text is recorded";
+export const FIXED_FAILURE_MESSAGE = "step failed; details withheld so that no document text is recorded";
 const UNSAFE_CHARS = /[^A-Za-z0-9._-]/g;
 
 /** Raised when a step's output does not allow the run to continue. */
@@ -89,7 +90,7 @@ const SECTION_2_1_OR_3_2 = /^requirements\.[^ ]+ §(2\.1|3\.2)$/;
 const SECTION_1 = /^requirements\.[^ ]+ §1$/;
 
 /** Checks the questions for the three flaws planted in samples/checkout-revamp. */
-function plantedFlaws(questions: ClarifyingQuestion[]): EvalReport["plantedFlawsFound"] {
+export function plantedFlaws(questions: ClarifyingQuestion[]): EvalReport["plantedFlawsFound"] {
   const cites = (q: ClarifyingQuestion, pattern: RegExp): boolean => q.sourceRefs.some((ref) => pattern.test(ref));
   return {
     contradiction: questions.some((q) => q.category === "contradiction" && cites(q, SECTION_2_1_OR_3_2)),
@@ -143,6 +144,7 @@ export async function evaluate(llm: LlmClient, sampleDir: string): Promise<EvalR
     items: { stories: 0, tasks: 0, suggestions: 0 },
     routing: { assigned: 0, needsDecision: 0 },
     created: 0,
+    failed: 0,
   };
 
   try {
@@ -196,8 +198,8 @@ export async function evaluate(llm: LlmClient, sampleDir: string): Promise<EvalR
       suggestions: active.filter((item) => item.origin === "ai_suggestion").length,
     };
 
-    const summary = await runStep(steps, "create", () =>
-      createInTicketing({
+    await runStep(steps, "create", async () => {
+      const summary = await createInTicketing({
         adapter,
         meta,
         projectKey: meta.key,
@@ -216,9 +218,12 @@ export async function evaluate(llm: LlmClient, sampleDir: string): Promise<EvalR
         onItemCreated: async () => {},
         onItemFailed: async () => {},
         onClarificationsWritten: async () => {},
-      }),
-    );
-    report.created = summary.created;
+      });
+      report.created = summary.created;
+      report.failed = summary.failed;
+      // Any failed item makes the create step not ok, though the counts above are still reported.
+      if (summary.failed > 0) throw new EvalCheckError("some items were not created");
+    });
   } catch (error) {
     if (!(error instanceof StepAborted)) throw error;
   }
@@ -238,6 +243,7 @@ type ProfileOverrides = Partial<
 
 function readProfile(path: string | undefined): ProfileOverrides {
   if (path === undefined) return {};
+  // A bad profile file is not echoed, because a parse error can quote the apiKey it contains.
   const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("The profile JSON must be an object");
@@ -248,6 +254,17 @@ function readProfile(path: string | undefined): ProfileOverrides {
 /** A configuration problem whose message is fixed text, so it is safe to print. */
 class EvalConfigError extends Error {
   override name = "EvalConfigError";
+}
+
+/** The profile's context window, else LLM_CONTEXT_TOKENS, else the default. */
+function contextTokensFrom(profile: ProfileOverrides, env: NodeJS.ProcessEnv): number {
+  if (profile.contextTokens !== undefined) return profile.contextTokens;
+  if (env.LLM_CONTEXT_TOKENS === undefined || env.LLM_CONTEXT_TOKENS === "") return DEFAULT_CONTEXT_TOKENS;
+  const parsed = Number(env.LLM_CONTEXT_TOKENS);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new EvalConfigError("LLM_CONTEXT_TOKENS must be a positive whole number");
+  }
+  return parsed;
 }
 
 function providerConfigFrom(profile: ProfileOverrides, env: NodeJS.ProcessEnv): ProviderConfig {
@@ -262,7 +279,7 @@ function providerConfigFrom(profile: ProfileOverrides, env: NodeJS.ProcessEnv): 
     apiKey,
     model,
     supportsJsonMode: profile.supportsJsonMode ?? false,
-    contextTokens: profile.contextTokens ?? DEFAULT_CONTEXT_TOKENS,
+    contextTokens: contextTokensFrom(profile, env),
   };
 }
 
@@ -278,12 +295,15 @@ function printReport(report: EvalReport): void {
     `Items: stories=${report.items.stories} tasks=${report.items.tasks} suggestions=${report.items.suggestions}`,
   );
   console.log(`Routing: assigned=${report.routing.assigned} needsDecision=${report.routing.needsDecision}`);
-  console.log(`Created: ${report.created}`);
+  console.log(`Created: ${report.created} Failed: ${report.failed}`);
 }
 
 async function main(argv: string[]): Promise<void> {
   if (existsSync(".env.local")) process.loadEnvFile(".env.local");
   const profileIndex = argv.indexOf("--profile-json");
+  if (profileIndex >= 0 && argv[profileIndex + 1] === undefined) {
+    throw new EvalConfigError("--profile-json needs a file path");
+  }
   const profilePath = profileIndex >= 0 ? argv[profileIndex + 1] : undefined;
   const llm = createLlmClient(providerConfigFrom(readProfile(profilePath), process.env));
 
@@ -298,7 +318,7 @@ async function main(argv: string[]): Promise<void> {
 }
 
 // Runs only when this file is the entry point, so importing it (as the test does) has no side effects.
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   main(process.argv.slice(2)).catch((error: unknown) => {
     // Only fixed configuration messages are printed. Other errors show their name, so no
     // configuration values or document text leak out.

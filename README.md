@@ -82,15 +82,24 @@ Ollama ignores the key, but the field must not be empty. Use a model with a cont
 
 ## Database
 
-By default the app uses **PGlite**, an embedded Postgres, stored at `./.data/pglite`. You need nothing else to run it.
+Without `DATABASE_URL`, the app uses an embedded database, PGlite, stored at `./.data/pglite`. See [Known deviations](#known-deviations-from-the-plan).
 
-To use a real Postgres server instead, start one and set `DATABASE_URL`. A `docker-compose.yml` is included for this:
+To use a real Postgres server, set `POSTGRES_PASSWORD` first. The included `docker-compose.yml` requires it and does not start without it:
 
 ```bash
+export POSTGRES_PASSWORD=<choose a password>
 docker compose up -d
 ```
 
-Then set `DATABASE_URL` in `.env.local` to the URL from that file. Docker is optional.
+On Windows PowerShell, use `$env:POSTGRES_PASSWORD = "<choose a password>"`, then run `docker compose up -d`.
+
+Then set this in `.env.local`, with the same password:
+
+```
+DATABASE_URL=postgres://copilot:<password>@localhost:5432/copilot
+```
+
+Docker is optional. Any Postgres 17 server works if it has a `copilot` user and a `copilot` database.
 
 ## Scripts
 
@@ -101,6 +110,7 @@ Then set `DATABASE_URL` in `.env.local` to the URL from that file. Docker is opt
 | `npm run typecheck` | TypeScript check |
 | `npm run samples` | Rebuilds the binary sample documents in `samples/checkout-revamp` from their Markdown sources |
 | `npm run eval` | Runs the pipeline on the Checkout Revamp sample with your configured LLM and prints a table |
+| `npm run backdate -- <runId> <days>` | Backdates one run so the retention purge treats it as expired. Used by the smoke test. Stop the app first |
 
 ### Evaluating a model
 
@@ -118,6 +128,8 @@ The evaluation creates tickets in a fake Jira project, not in your Jira site. It
 
 - **Team routing uses components only.** A team in the routing file becomes a Jira component with the same name. The Jira Team field is not set, because it needs Atlassian Teams IDs, and that is deferred.
 - **Single-call draft generation.** The epic, stories and tasks come from one model call, not a staged process. Very large inputs may fit poorly in a small context window. The app checks the input size before it calls the model.
+- **PGlite is the default database, not Postgres.** The build machine has no Docker, so the default is the embedded PGlite database at `./.data/pglite`. Postgres is optional and is enabled by setting `DATABASE_URL`.
+- **Guideline-requested Jira labels are not applied.** Created issues get only `ai-backlog`, `ai-run-<first 8 characters of the run ID>`, and `ai-suggested` on accepted AI suggestions. A label that a guideline file asks for, such as `checkout`, is not added.
 
 ## Testing
 

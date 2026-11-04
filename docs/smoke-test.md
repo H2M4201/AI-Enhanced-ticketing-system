@@ -73,7 +73,7 @@ Use the sample set in `samples/checkout-revamp`. Upload the files as listed belo
 
 - [ ] The epic is an Epic. Each story is a Story under the epic. Each sub-task is under its story.
 - [ ] Each issue has the assignee the app showed.
-- [ ] Labels: `ai-backlog`, `checkout` and `ai-run-<first 8 characters of the run ID>` on every issue. The accepted AI suggestions also carry `ai-suggested`.
+- [ ] Labels: `ai-backlog` and `ai-run-<first 8 characters of the run ID>` on every issue. The accepted AI suggestions also carry `ai-suggested`. Labels that the guidelines ask for are not applied (a known deviation in the README), so do not expect a `checkout` label.
 - [ ] Components match the teams, for example Payments on the payment work.
 - [ ] The description of an accepted AI suggestion starts with "Proposed by AI and accepted by <your name>."
 - [ ] Every description ends with the footer `ai-backlog-item: <id>`.
@@ -99,21 +99,13 @@ Use a second run, so you can see both creation attempts.
 
 ## 12. Retention (spec §6.13)
 
-The app does not accept a retention of 0 days. The project setting and `RETENTION_DAYS` must be at least 1, so this check uses 1 day and older timestamps.
+The app does not accept a retention of 0 days. The project setting and `RETENTION_DAYS` must be at least 1, so this check uses 1 day, and `npm run backdate` makes the run older than that. The script works on both PGlite and Postgres.
 
 - [ ] Set the project's retention to 1 day in the Retention section.
-- [ ] Finish a run, so that it has a completed time.
-- [ ] Make the run older than the retention period. Use Postgres (`DATABASE_URL` set to a real server), and run:
-
-  ```sql
-  UPDATE runs
-     SET completed_at = now() - interval '2 days',
-         last_activity_at = now() - interval '2 days'
-   WHERE id = '<run id>';
-  ```
-
-  With the embedded PGlite database there is no SQL client, so this check cannot be done as written. Record it as not run.
-- [ ] Restart the app. The purge runs at startup, and then every hour.
+- [ ] Note the run ID from the run's page URL (`/runs/<run id>`). It is a UUID.
+- [ ] **Stop the app** (Ctrl+C in the `npm run dev` terminal). PGlite locks its folder, so the script cannot open the database while the app runs.
+- [ ] Run `npm run backdate -- <run id> 2`. It prints `Backdated run <run id> by 2 day(s)`. A message `No run has that ID` means the ID is wrong.
+- [ ] Start the app with `npm run dev`. The purge runs at startup, and then every hour.
 - [ ] Open the run's documents. The text shows **Deleted by retention policy**.
 - [ ] Jira is unchanged by the purge. The tickets that were created remain.
 
