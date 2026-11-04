@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { safeLog } from "@/lib/log";
 import type { Db } from "@/server/db/client";
 import { projects, runDocuments, runs } from "@/server/db/schema";
@@ -32,7 +32,7 @@ export async function purgeExpired(db: Db, now: Date): Promise<{ documentsPurged
     await tx
       .update(runs)
       .set({ epicText: "" })
-      .where(and(eq(runs.status, "done"), inArray(runs.id, expiredRunIds(tx, now))));
+      .where(and(eq(runs.status, "done"), ne(runs.epicText, ""), inArray(runs.id, expiredRunIds(tx, now))));
     return purged.length;
   });
   safeLog("retention.purge", { count: documentsPurged });

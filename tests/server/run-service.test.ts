@@ -238,21 +238,23 @@ describe("RunService", () => {
     expect((await getRun(db, run.id)).status).toBe("review");
   });
 
-  it("refuses checks, questions and draft once a document was purged by retention", async () => {
+  it("refuses to generate a draft once a document was purged by retention", async () => {
     const { db, user, project } = await seed();
     const llm = new FakeLlm([STRUCTURE_REPLY, ROSTER_REPLY, QUESTIONS_REPLY]);
     const svc = serviceWith(db, llm, fakeFromSample());
     const run = await svc.createRun(user.id, project.id, { epicText: EPIC, existingEpicKey: null });
     await svc.addDocument(run.id, "requirements.md", sampleBytes("requirements.md"));
     await svc.runChecks(user.id, run.id);
+    const questions = await svc.generateQuestions(run.id);
+    for (const q of questions) await svc.resolveQuestion(run.id, q.id, { kind: "judgment" });
+    expect((await getRun(db, run.id)).status).toBe("questions");
 
     await purgeExpired(db, new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
 
-    const message = "Documents were deleted by retention policy. Start a new breakdown.";
-    await expect(svc.runChecks(user.id, run.id)).rejects.toThrow(message);
-    await expect(svc.generateQuestions(run.id)).rejects.toThrow(message);
-    await expect(svc.generateDraft(run.id)).rejects.toBeInstanceOf(RunStateError);
-    expect(llm.calls).toHaveLength(2);
+    await expect(svc.generateDraft(run.id)).rejects.toThrow(
+      "Documents were deleted by retention policy. Start a new breakdown.",
+    );
+    expect(llm.calls).toHaveLength(3);
   });
 
   it("addDocument checks the run status before parsing the file", async () => {

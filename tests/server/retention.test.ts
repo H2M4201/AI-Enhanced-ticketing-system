@@ -46,7 +46,13 @@ type Seeded = Awaited<ReturnType<typeof seed>>;
 async function addRun(
   db: Seeded["db"],
   s: Seeded,
-  values: { status?: "inputs" | "done"; completedAt?: Date | null; lastActivityAt: Date; epicText?: string },
+  values: {
+    status?: "inputs" | "done";
+    completedAt?: Date | null;
+    lastActivityAt: Date;
+    createdAt?: Date;
+    epicText?: string;
+  },
 ) {
   const [run] = await db
     .insert(runs)
@@ -57,6 +63,7 @@ async function addRun(
       status: values.status ?? "done",
       completedAt: values.completedAt ?? null,
       lastActivityAt: values.lastActivityAt,
+      createdAt: values.createdAt,
     })
     .returning();
   await db.insert(runDocuments).values({ runId: run.id, filename: "brief.md", kind: "md", sections: SECTIONS, charCount: 30 });
@@ -105,6 +112,21 @@ describe("purgeExpired", () => {
     expect(doc.sections).toEqual(SECTIONS);
     expect(doc.deletedAt).toBeNull();
     expect(await s.db.select().from(projectFiles)).toEqual(before);
+  });
+
+  it("keeps a run with an old createdAt but recent activity", async () => {
+    const s = await seed(7);
+    const active = await addRun(s.db, s, {
+      status: "inputs",
+      createdAt: daysAgo(30),
+      lastActivityAt: daysAgo(1),
+    });
+
+    expect(await purgeExpired(s.db, NOW)).toEqual({ documentsPurged: 0 });
+
+    const doc = await docOf(s.db, active.id);
+    expect(doc.sections).toEqual(SECTIONS);
+    expect(doc.deletedAt).toBeNull();
   });
 
   it("respects per-project retentionDays", async () => {
