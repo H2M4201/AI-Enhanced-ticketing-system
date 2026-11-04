@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import {
   ClarifyingQuestionSchema,
   DraftItemSchema,
@@ -9,13 +9,27 @@ import {
 } from "@/core/domain";
 import type { Db } from "@/server/db/client";
 import { clarifyingQuestions, draftItems, projectFiles, runDocuments, runs, users } from "@/server/db/schema";
-import { NotFoundError } from "@/server/errors";
+import { NotFoundError, RunStateError } from "@/server/errors";
 
 export type Run = typeof runs.$inferSelect;
 export type RunInsert = typeof runs.$inferInsert;
 export type RunPatch = Partial<RunInsert>;
 export type DocumentRow = typeof runDocuments.$inferSelect;
 export type ProjectFileRow = typeof projectFiles.$inferSelect;
+
+/** A ticket creation whose lock is older than this is treated as abandoned and can be taken over. */
+export const CREATION_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
+
+const STALE_DRAFT_MESSAGE = "Draft changed in another tab — reload";
+
+function creationLockCutoff(): Date {
+  return new Date(Date.now() - CREATION_LOCK_TIMEOUT_MS);
+}
+
+/** Whether a ticket creation currently holds the run. */
+export function isCreationLocked(run: Run): boolean {
+  return run.creatingSince !== null && run.creatingSince.getTime() > Date.now() - CREATION_LOCK_TIMEOUT_MS;
+}
 
 /** A stored question with its row id, its domain id (Q<rank>) and its resolution once given. */
 export type StoredQuestion = {
@@ -125,12 +139,97 @@ function toRow(runId: string, item: DraftItem): typeof draftItems.$inferInsert {
   };
 }
 
-/** Replaces the whole draft in one transaction. */
+async function writeDraftRows(tx: Db, runId: string, items: DraftItem[]): Promise<void> {
+  await tx.delete(draftItems).where(eq(draftItems.runId, runId));
+  if (items.length > 0) await tx.insert(draftItems).values(items.map((item) => toRow(runId, item)));
+}
+
+function bumpVersion() {
+  return { draftVersion: sql`${runs.draftVersion} + 1` };
+}
+
+/** Replaces the whole draft in one transaction. Used when a draft is generated, which always bumps the version. */
 export async function saveDraft(db: Db, runId: string, items: DraftItem[]): Promise<void> {
   await db.transaction(async (tx) => {
-    await tx.delete(draftItems).where(eq(draftItems.runId, runId));
-    if (items.length > 0) await tx.insert(draftItems).values(items.map((item) => toRow(runId, item)));
+    await tx.update(runs).set(bumpVersion()).where(eq(runs.id, runId));
+    await writeDraftRows(tx, runId, items);
   });
+}
+
+/**
+ * Replaces the whole draft only if the run is still in review at the expected version.
+ * A stale version rolls the transaction back, so a second tab's edit cannot overwrite the first.
+ */
+export async function saveDraftVersioned(db: Db, runId: string, expectedVersion: number, items: DraftItem[]): Promise<void> {
+  await db.transaction(async (tx) => {
+    const bumped = await tx
+      .update(runs)
+      .set(bumpVersion())
+      .where(and(eq(runs.id, runId), eq(runs.draftVersion, expectedVersion), eq(runs.status, "review")))
+      .returning({ id: runs.id });
+    if (bumped.length === 0) throw new RunStateError(STALE_DRAFT_MESSAGE);
+    await writeDraftRows(tx, runId, items);
+  });
+}
+
+/**
+ * Writes one item's editable fields while tickets are being created. The item must not have a Jira key,
+ * the run must still be creating, and no creation may hold the lock.
+ */
+export async function saveItemEdit(db: Db, runId: string, expectedVersion: number, item: DraftItem): Promise<void> {
+  await db.transaction(async (tx) => {
+    const bumped = await tx
+      .update(runs)
+      .set(bumpVersion())
+      .where(
+        and(
+          eq(runs.id, runId),
+          eq(runs.draftVersion, expectedVersion),
+          eq(runs.status, "creating"),
+          or(isNull(runs.creatingSince), lt(runs.creatingSince, creationLockCutoff())),
+        ),
+      )
+      .returning({ id: runs.id });
+    if (bumped.length === 0) throw new RunStateError(STALE_DRAFT_MESSAGE);
+
+    const updated = await tx
+      .update(draftItems)
+      .set({
+        title: item.title,
+        description: item.description,
+        acceptanceCriteria: item.acceptanceCriteria,
+        estimate: item.estimate,
+        fieldValues: item.fieldValues,
+        routing: item.routing,
+        suggestionStatus: item.suggestionStatus,
+      })
+      .where(and(eq(draftItems.id, item.id), eq(draftItems.runId, runId), isNull(draftItems.jiraKey)))
+      .returning({ id: draftItems.id });
+    if (updated.length === 0) throw new RunStateError("This item already exists in Jira and cannot be changed");
+  });
+}
+
+/**
+ * Takes the creation lock and moves the run to creating. Returns false when the run is not
+ * in review or creating, or when another creation holds an unexpired lock.
+ */
+export async function claimCreation(db: Db, runId: string): Promise<boolean> {
+  const claimed = await db
+    .update(runs)
+    .set({ status: "creating", creatingSince: new Date() })
+    .where(
+      and(
+        eq(runs.id, runId),
+        inArray(runs.status, ["review", "creating"]),
+        or(isNull(runs.creatingSince), lt(runs.creatingSince, creationLockCutoff())),
+      ),
+    )
+    .returning({ id: runs.id });
+  return claimed.length > 0;
+}
+
+export async function releaseCreation(db: Db, runId: string): Promise<void> {
+  await updateRun(db, runId, { creatingSince: null });
 }
 
 /** The draft ordered by parent, then position. */

@@ -1,5 +1,13 @@
 import { computeBlockers, type Blocker } from "@/core/blockers";
-import type { ClarifyingQuestion, DraftItem, ItemKind, ParsedDocument, Resolution } from "@/core/domain";
+import type {
+  ClarifyingQuestion,
+  DraftItem,
+  ItemKind,
+  ParsedDocument,
+  Resolution,
+  Roster,
+  RosterRule,
+} from "@/core/domain";
 import { parseDocument } from "@/core/ingest/parse";
 import { checkContextBudget } from "@/core/llm/budget";
 import type { LlmClient } from "@/core/llm/client";
@@ -31,15 +39,20 @@ import {
 } from "@/server/runs/context";
 import { applyDraftOp, type DraftOp } from "@/server/runs/ops";
 import {
+  claimCreation,
   deleteDocument,
   getRun,
   insertDocument,
   insertRun,
+  isCreationLocked,
   listQuestions,
   loadDraft,
+  releaseCreation,
   replaceQuestions,
   type Run,
   saveDraft,
+  saveDraftVersioned,
+  saveItemEdit,
   saveResolution,
   setItemCreated,
   setItemFailed,
@@ -67,11 +80,20 @@ export type ChecksResult = {
   ok: boolean;
   budget: { estimated: number; limit: number; ok: boolean };
   structure: { errors: string[]; warnings: string[]; notes: string[] };
-  roster: { teams: number; people: number; rules: number; unresolved: UnresolvedName[] };
+  roster: {
+    teams: Roster["teams"];
+    people: Roster["people"];
+    rules: RosterRule[];
+    /** Each team's resolved default user, or null when the default person is not an assignable user. */
+    teamDefaults: Record<string, AssignableUser | null>;
+    unresolved: UnresolvedName[];
+  };
   existingEpicError: string | null;
 };
 
 export type ReviewView = {
+  /** The version to pass to editDraft. */
+  draftVersion: number;
   items: DraftItem[];
   blockers: Blocker[];
   requiredFields: Record<ItemKind, { key: string; name: string }[]>;
@@ -117,15 +139,22 @@ export class RunService {
   }
 
   /** Documents can change before the draft is generated. A change to a checked run sends it back to inputs. */
+  private async documentRun(runId: string): Promise<Run> {
+    const run = await getRun(this.deps.db, runId);
+    assertStatus(run, ["inputs", "checked"], "Documents can only change before the draft is generated");
+    return run;
+  }
+
   private async openInputs(runId: string): Promise<void> {
     const { db } = this.deps;
-    const run = await getRun(db, runId);
-    assertStatus(run, ["inputs", "checked"], "Documents can only change before the draft is generated");
+    const run = await this.documentRun(runId);
     await touch(db, runId);
     if (run.status === "checked") await updateRun(db, runId, { status: "inputs" });
   }
 
   async addDocument(runId: string, filename: string, bytes: Uint8Array): Promise<RunDocumentView> {
+    // The status is checked before parsing, so a refused change never reports a parse error.
+    await this.documentRun(runId);
     const parsed = await parseDocument(filename, bytes);
     await this.openInputs(runId);
     const charCount = parsed.sections.reduce((total, section) => total + section.text.length, 0);
@@ -168,7 +197,7 @@ export class RunService {
         ok: false,
         budget,
         structure: { errors: [], warnings: [], notes: [] },
-        roster: { teams: 0, people: 0, rules: 0, unresolved: [] },
+        roster: { teams: [], people: [], rules: [], teamDefaults: {}, unresolved: [] },
         existingEpicError: null,
       };
     }
@@ -199,9 +228,10 @@ export class RunService {
         ? { errors: [], warnings: validation.warnings, notes: plan.notes }
         : { errors: validation.errors, warnings: [], notes: plan.notes },
       roster: {
-        teams: roster.teams.length,
-        people: roster.people.length,
-        rules: roster.rules.length,
+        teams: roster.teams,
+        people: roster.people,
+        rules: roster.rules,
+        teamDefaults: resolved.teamDefaults,
         unresolved: resolved.unresolved,
       },
       existingEpicError,
@@ -269,14 +299,33 @@ export class RunService {
     return routed;
   }
 
-  /** Applies one edit to the reviewed draft. Editing is allowed only while the draft is under review. */
-  async editDraft(runId: string, op: DraftOp): Promise<DraftItem[]> {
+  /**
+   * Applies one edit to the draft. Under review, any op is allowed and the whole draft is saved.
+   * While tickets are being created, only route and update are allowed, on items without a Jira key,
+   * and only when no creation holds the lock. expectedVersion must match the draft the caller saw.
+   */
+  async editDraft(runId: string, op: DraftOp, expectedVersion: number): Promise<DraftItem[]> {
     const { db } = this.deps;
     const run = await getRun(db, runId);
-    assertStatus(run, ["review"], "The draft can only be edited while it is under review");
+    assertStatus(run, ["review", "creating"], "The draft can only be edited while it is under review");
     await touch(db, runId);
-    const next = applyDraftOp(await loadDraft(db, runId), op, run.assignableUsers ?? []);
-    await saveDraft(db, runId, next);
+    const users = run.assignableUsers ?? [];
+
+    if (run.status === "review") {
+      const next = applyDraftOp(await loadDraft(db, runId), op, users);
+      await saveDraftVersioned(db, runId, expectedVersion, next);
+      return next;
+    }
+
+    // Creating: the gate comes before applying the op, so refusals are reported as state errors.
+    if (op.type !== "route" && op.type !== "update") {
+      throw new RunStateError("While tickets are being created, only assignee and field edits are allowed");
+    }
+    if (isCreationLocked(run)) throw new RunStateError("Ticket creation is in progress");
+    const next = applyDraftOp(await loadDraft(db, runId), op, users);
+    const changed = next.find((item) => item.id === op.id);
+    if (!changed) throw new NotFoundError("Draft item");
+    await saveItemEdit(db, runId, expectedVersion, changed);
     return next;
   }
 
@@ -290,6 +339,7 @@ export class RunService {
     const stored = await listQuestions(db, runId);
 
     return {
+      draftVersion: run.draftVersion,
       items,
       blockers: computeBlockers(items, requiredFields),
       requiredFields,
@@ -320,36 +370,53 @@ export class RunService {
     const structure = requireStructure(run);
     const requiredFields = requiredFieldsOf(structure);
 
-    const items = await loadDraft(db, runId);
-    const blockers = computeBlockers(items, requiredFields);
+    const blockers = computeBlockers(await loadDraft(db, runId), requiredFields);
     if (blockers.length > 0) throw new CreateBlockedError(blockers);
 
-    const adapter = await this.deps.adapterFor(userId, project);
-    const meta = await adapter.getProjectMeta(project.jiraProjectKey);
-    const acceptedByName = await userDisplayName(db, userId);
-    const stored = await listQuestions(db, runId);
+    // The claim is the only guard against two creations running at once. It re-checks the status atomically.
+    if (!(await claimCreation(db, runId))) {
+      const current = await getRun(db, runId);
+      throw new RunStateError(
+        ["review", "creating"].includes(current.status)
+          ? "Creation already in progress"
+          : "Tickets can only be created from a reviewed draft",
+      );
+    }
 
-    await updateRun(db, runId, { status: "creating" });
-    const summary = await createInTicketing({
-      adapter,
-      meta,
-      projectKey: project.jiraProjectKey,
-      runId,
-      items,
-      structure,
-      existingEpicKey: run.existingEpicKey,
-      clarificationsText: clarificationsTextOf(stored),
-      clarificationsWritten: run.clarificationsWritten,
-      acceptedByName,
-      requiredFields,
-      onItemCreated: (itemId, key) => setItemCreated(db, itemId, key),
-      onItemFailed: (itemId, error) => setItemFailed(db, itemId, error),
-      onClarificationsWritten: () => updateRun(db, runId, { clarificationsWritten: true }),
-    });
+    try {
+      const adapter = await this.deps.adapterFor(userId, project);
+      const meta = await adapter.getProjectMeta(project.jiraProjectKey);
+      const acceptedByName = await userDisplayName(db, userId);
+      const stored = await listQuestions(db, runId);
+      const items = await loadDraft(db, runId);
 
-    const complete = activeItems(await loadDraft(db, runId)).every((item) => item.jiraKey !== null);
-    if (complete) await updateRun(db, runId, { status: "done", completedAt: new Date() });
-    safeLog("run.tickets", { runId, count: summary.created, status: complete ? "done" : "creating" });
-    return summary;
+      const summary = await createInTicketing({
+        adapter,
+        meta,
+        projectKey: project.jiraProjectKey,
+        runId,
+        items,
+        structure,
+        existingEpicKey: run.existingEpicKey,
+        clarificationsText: clarificationsTextOf(stored),
+        clarificationsWritten: run.clarificationsWritten,
+        acceptedByName,
+        requiredFields,
+        onItemCreated: (itemId, key) => setItemCreated(db, itemId, key),
+        onItemFailed: (itemId, error) => setItemFailed(db, itemId, error),
+        onClarificationsWritten: () => updateRun(db, runId, { clarificationsWritten: true }),
+      });
+
+      const complete = activeItems(await loadDraft(db, runId)).every((item) => item.jiraKey !== null);
+      if (complete) await updateRun(db, runId, { status: "done", completedAt: new Date() });
+      safeLog("run.tickets", { runId, count: summary.created, status: complete ? "done" : "creating" });
+      return summary;
+    } catch (error) {
+      // Nothing was created when a blocker appears inside the claim, so the run returns to review for fixing.
+      if (error instanceof CreateBlockedError) await updateRun(db, runId, { status: "review" });
+      throw error;
+    } finally {
+      await releaseCreation(db, runId);
+    }
   }
 }

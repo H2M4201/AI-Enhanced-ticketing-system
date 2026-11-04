@@ -3,7 +3,7 @@ import { decryptSecret } from "@/lib/crypto";
 import { resetEnvCache } from "@/lib/env";
 import { createProfile, describeProvider, listProfiles, resolveProviderConfig } from "@/server/providers";
 import { createProject, getProject, setProjectProvider, type Project } from "@/server/projects";
-import { NoProviderError } from "@/server/errors";
+import { ForbiddenError, NoProviderError } from "@/server/errors";
 import { users } from "@/server/db/schema";
 import { testDb } from "../helpers/db";
 
@@ -67,7 +67,7 @@ describe("provider profiles", () => {
   it("stores the key encrypted and resolves the project's profile with the decrypted key", async () => {
     const { db, user, project } = await seed();
     const created = await createProfile(db, user.id, profileInput);
-    await setProjectProvider(db, project.id, created.id);
+    await setProjectProvider(db, project.id, created.id, user.id);
 
     const config = await resolveProviderConfig(db, await getProject(db, project.id));
     expect(config).toEqual({
@@ -126,5 +126,45 @@ describe("provider profiles", () => {
     await expect(createProfile(db, user.id, { ...profileInput, baseUrl: "ftp://llm.example.com" })).rejects.toThrow(
       "Base URL",
     );
+  });
+
+  it("links only a profile the acting user owns, and allows unlinking", async () => {
+    const { db, user, project } = await seed();
+    const [other] = await db
+      .insert(users)
+      .values({
+        atlassianAccountId: "acc-other",
+        displayName: "Other",
+        accessTokenEnc: "x",
+        refreshTokenEnc: "y",
+        accessTokenExpiresAt: new Date(),
+      })
+      .returning();
+    const ownProfile = await createProfile(db, user.id, profileInput);
+    const foreignProfile = await createProfile(db, other.id, { ...profileInput, name: "Theirs" });
+
+    await expect(setProjectProvider(db, project.id, foreignProfile.id, user.id)).rejects.toBeInstanceOf(ForbiddenError);
+    expect((await getProject(db, project.id)).providerProfileId).toBeNull();
+
+    await setProjectProvider(db, project.id, ownProfile.id, user.id);
+    expect((await getProject(db, project.id)).providerProfileId).toBe(ownProfile.id);
+
+    await setProjectProvider(db, project.id, null, user.id);
+    expect((await getProject(db, project.id)).providerProfileId).toBeNull();
+  });
+
+  it("shows the raw value rather than failing when the environment base URL is not a URL", async () => {
+    const { db, project } = await seed();
+    process.env.LLM_BASE_URL = "not a url";
+    process.env.LLM_API_KEY = "env-key";
+    process.env.LLM_MODEL = "env-model";
+    resetEnvCache();
+
+    expect(await describeProvider(db, project)).toEqual({
+      source: "env",
+      name: "Environment default",
+      model: "env-model",
+      baseUrlHost: "not a url",
+    });
   });
 });

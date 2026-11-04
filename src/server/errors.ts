@@ -14,6 +14,14 @@ export class RunStateError extends Error {
   }
 }
 
+/** The acting user is not allowed to use the resource (for example, another user's provider profile). */
+export class ForbiddenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ForbiddenError";
+  }
+}
+
 /** A project, run, document, question, draft item, provider profile or user was not found. */
 export class NotFoundError extends Error {
   constructor(what: string) {

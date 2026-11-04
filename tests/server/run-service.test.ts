@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "@/core/llm/client";
+import type { DraftItem } from "@/core/domain";
 import { CreateBlockedError } from "@/core/pipeline/create";
 import { validateStructure } from "@/core/pipeline/structure";
 import { TreeError } from "@/core/tree";
@@ -140,12 +141,9 @@ async function seed() {
   return { db, user, project };
 }
 
-function serviceWith(
-  db: Awaited<ReturnType<typeof testDb>>,
-  llm: FakeLlm,
-  fake: FakeTicketingAdapter,
-  overrides: Partial<RunDeps> = {},
-): RunService {
+type Db = Awaited<ReturnType<typeof testDb>>;
+
+function serviceWith(db: Db, llm: FakeLlm, fake: FakeTicketingAdapter, overrides: Partial<RunDeps> = {}): RunService {
   return new RunService({
     db,
     llmFor: async () => llm,
@@ -155,36 +153,48 @@ function serviceWith(
   });
 }
 
+/** Applies an edit using the draft version the reviewer currently sees. */
+async function edit(svc: RunService, runId: string, op: Parameters<RunService["editDraft"]>[1]): Promise<DraftItem[]> {
+  const { draftVersion } = await svc.getReview(runId);
+  return svc.editDraft(runId, op, draftVersion);
+}
+
+/** A run that has passed checks, answered its questions, generated and routed a draft, and cleared every blocker. */
+async function reviewedRun() {
+  const { db, user, project } = await seed();
+  const fake = fakeFromSample();
+  const llm = new FakeLlm([STRUCTURE_REPLY, ROSTER_REPLY, QUESTIONS_REPLY, JSON.stringify(sampleDraftOutput), routeReply]);
+  const svc = serviceWith(db, llm, fake);
+
+  const run = await svc.createRun(user.id, project.id, { epicText: EPIC, existingEpicKey: null });
+  for (const name of SAMPLE_FILES) await svc.addDocument(run.id, name, sampleBytes(name));
+  await svc.runChecks(user.id, run.id);
+  const questions = await svc.generateQuestions(run.id);
+  for (const q of questions) await svc.resolveQuestion(run.id, q.id, { kind: "judgment" });
+  await svc.generateDraft(run.id);
+
+  for (const blocker of (await svc.getReview(run.id)).blockers) {
+    if (blocker.type === "pending_suggestion") {
+      await edit(svc, run.id, { type: "suggestion", id: blocker.itemId, status: "accepted" });
+    }
+    if (blocker.type === "needs_routing") {
+      await edit(svc, run.id, { type: "route", id: blocker.itemId, accountId: "acc-bao" });
+    }
+  }
+  return { db, user, fake, svc, run };
+}
+
+const titled = (items: DraftItem[], title: string): DraftItem => {
+  const found = items.find((i) => i.title === title);
+  if (!found) throw new Error(`no item titled ${title}`);
+  return found;
+};
+
 describe("RunService", () => {
   it("full greenfield run: checks → questions → draft → edit → create", async () => {
-    const { db, user, project } = await seed();
-    const fake = fakeFromSample();
-    const llm = new FakeLlm([STRUCTURE_REPLY, ROSTER_REPLY, QUESTIONS_REPLY, JSON.stringify(sampleDraftOutput), routeReply]);
-    const svc = serviceWith(db, llm, fake);
+    const { db, user, fake, svc, run } = await reviewedRun();
 
-    const run = await svc.createRun(user.id, project.id, { epicText: EPIC, existingEpicKey: null });
-    for (const name of SAMPLE_FILES) await svc.addDocument(run.id, name, sampleBytes(name));
-
-    expect((await svc.runChecks(user.id, run.id)).ok).toBe(true);
-    expect((await getRun(db, run.id)).status).toBe("checked");
-
-    const questions = await svc.generateQuestions(run.id);
-    expect(questions.map((q) => q.id)).toEqual(["Q1", "Q2"]);
-    for (const q of questions) await svc.resolveQuestion(run.id, q.id, { kind: "judgment" });
-
-    await svc.generateDraft(run.id);
-    let review = await svc.getReview(run.id);
-    expect(review.blockers.length).toBeGreaterThan(0);
-
-    for (const blocker of review.blockers) {
-      if (blocker.type === "pending_suggestion") {
-        await svc.editDraft(run.id, { type: "suggestion", id: blocker.itemId, status: "accepted" });
-      }
-      if (blocker.type === "needs_routing") {
-        await svc.editDraft(run.id, { type: "route", id: blocker.itemId, accountId: "acc-bao" });
-      }
-    }
-    review = await svc.getReview(run.id);
+    const review = await svc.getReview(run.id);
     expect(review.blockers).toEqual([]);
     expect(review.clarificationsPreview).toContain("## Clarifications");
 
@@ -192,7 +202,9 @@ describe("RunService", () => {
     expect(result).toEqual({ created: 12, failed: 0, skipped: 0 });
     expect(fake.issues.length).toBe(result.created);
     expect(fake.issues.find((i) => i.issueTypeName === "Epic")!.description).toContain("## Clarifications");
-    expect((await getRun(db, run.id)).status).toBe("done");
+    const after = await getRun(db, run.id);
+    expect(after.status).toBe("done");
+    expect(after.creatingSince).toBeNull();
   });
 
   it("generateDraft refuses while questions are unresolved", async () => {
@@ -209,6 +221,31 @@ describe("RunService", () => {
     expect(llm.calls).toHaveLength(3);
   });
 
+  it("zero questions still moves the run to questions, and the draft can be generated", async () => {
+    const { db, user, project } = await seed();
+    const llm = new FakeLlm([STRUCTURE_REPLY, ROSTER_REPLY, JSON.stringify({ questions: [] }), JSON.stringify(sampleDraftOutput), routeReply]);
+    const svc = serviceWith(db, llm, fakeFromSample());
+
+    const run = await svc.createRun(user.id, project.id, { epicText: EPIC, existingEpicKey: null });
+    await svc.addDocument(run.id, "requirements.md", sampleBytes("requirements.md"));
+    await svc.runChecks(user.id, run.id);
+    expect(await svc.generateQuestions(run.id)).toEqual([]);
+    expect((await getRun(db, run.id)).status).toBe("questions");
+
+    await svc.generateDraft(run.id);
+    expect((await getRun(db, run.id)).status).toBe("review");
+  });
+
+  it("addDocument checks the run status before parsing the file", async () => {
+    const { db, user, project } = await seed();
+    const svc = serviceWith(db, new FakeLlm([]), fakeFromSample());
+    const run = await svc.createRun(user.id, project.id, { epicText: EPIC, existingEpicKey: null });
+    await db.update(runs).set({ status: "review" }).where(eq(runs.id, run.id));
+
+    // An empty file would fail DocumentParseError; the status check must come first.
+    await expect(svc.addDocument(run.id, "empty.txt", new Uint8Array())).rejects.toBeInstanceOf(RunStateError);
+  });
+
   it("runChecks reports over-budget documents without calling the LLM or Jira", async () => {
     const { db, user, project } = await seed();
     const fake = fakeFromSample();
@@ -223,8 +260,26 @@ describe("RunService", () => {
     expect(result.ok).toBe(false);
     expect(result.budget).toEqual({ ok: false, estimated: expect.any(Number), limit: 1000 });
     expect(result.budget.estimated).toBeGreaterThan(1000);
+    expect(result.roster).toEqual({ teams: [], people: [], rules: [], teamDefaults: {}, unresolved: [] });
     expect(llm.calls).toHaveLength(0);
     expect(getMeta).not.toHaveBeenCalled();
+  });
+
+  it("runChecks returns the roster rows with resolved team defaults", async () => {
+    const { db, user, project } = await seed();
+    const fake = fakeFromSample();
+    const llm = new FakeLlm([STRUCTURE_REPLY, ROSTER_REPLY]);
+    const svc = serviceWith(db, llm, fake);
+
+    const run = await svc.createRun(user.id, project.id, { epicText: EPIC, existingEpicKey: null });
+    const result = await svc.runChecks(user.id, run.id);
+
+    expect(result.ok).toBe(true);
+    expect(result.roster.teams).toHaveLength(4);
+    expect(result.roster.people).toHaveLength(7);
+    expect(result.roster.rules.map((r) => r.id)).toEqual(["R1", "R2", "R3", "R4", "R5", "R6", "R7"]);
+    expect(result.roster.teamDefaults.Frontend?.displayName).toBe("Linh Tran");
+    expect(result.roster.unresolved).toEqual([]);
   });
 
   it("runChecks reports an existing epic key that is not an epic", async () => {
@@ -289,7 +344,7 @@ describe("RunService", () => {
     expect(saved.createError).toBe("Linking failed");
 
     await db.update(runs).set({ status: "review" }).where(eq(runs.id, run.id));
-    await expect(svc.editDraft(run.id, { type: "delete", id: story.id })).rejects.toBeInstanceOf(RunStateError);
+    await expect(svc.editDraft(run.id, { type: "delete", id: story.id }, 0)).rejects.toBeInstanceOf(RunStateError);
     expect(await loadDraft(db, run.id)).toHaveLength(2);
   });
 
@@ -302,7 +357,7 @@ describe("RunService", () => {
     await saveDraft(db, run.id, [epic, story]);
     await db.update(runs).set({ status: "review" }).where(eq(runs.id, run.id));
 
-    await expect(svc.editDraft(run.id, { type: "route", id: story.id, accountId: "acc-nobody" })).rejects.toBeInstanceOf(
+    await expect(svc.editDraft(run.id, { type: "route", id: story.id, accountId: "acc-nobody" }, 0)).rejects.toBeInstanceOf(
       TreeError,
     );
   });
@@ -325,5 +380,75 @@ describe("RunService", () => {
     await expect(svc.createTickets(user.id, run.id)).rejects.toBeInstanceOf(CreateBlockedError);
     expect(fake.issues).toHaveLength(0);
     expect((await getRun(db, run.id)).status).toBe("review");
+  });
+
+  it("two concurrent createTickets calls create each issue once", async () => {
+    const { db, user, fake, svc, run } = await reviewedRun();
+
+    const outcomes = await Promise.allSettled([svc.createTickets(user.id, run.id), svc.createTickets(user.id, run.id)]);
+
+    const rejected = outcomes.filter((o): o is PromiseRejectedResult => o.status === "rejected");
+    expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(RunStateError);
+
+    const titles = fake.issues.map((i) => i.summary);
+    expect(new Set(titles).size).toBe(titles.length);
+    expect(fake.issues).toHaveLength(12);
+    const after = await getRun(db, run.id);
+    expect(after.status).toBe("done");
+    expect(after.creatingSince).toBeNull();
+  });
+
+  it("a failed item is re-routed and retried alone, and the run ends done", async () => {
+    const { db, user, fake, svc, run } = await reviewedRun();
+    const failed = titled((await svc.getReview(run.id)).items, "QA: test one-page guest checkout");
+    fake.failNext.set(failed.id, "User cannot be assigned");
+
+    expect(await svc.createTickets(user.id, run.id)).toEqual({ created: 11, failed: 1, skipped: 0 });
+    expect((await getRun(db, run.id)).status).toBe("creating");
+    const stuck = titled((await svc.getReview(run.id)).items, failed.title);
+    expect(stuck.createError).toBe("User cannot be assigned");
+    expect(stuck.jiraKey).toBeNull();
+
+    await edit(svc, run.id, { type: "route", id: failed.id, accountId: "acc-linh" });
+    fake.failNext.delete(failed.id);
+
+    expect(await svc.createTickets(user.id, run.id)).toEqual({ created: 1, failed: 0, skipped: 11 });
+    expect(fake.issues).toHaveLength(12);
+    const created = fake.issues.find((i) => i.summary === failed.title)!;
+    expect(created.assigneeAccountId).toBe("acc-linh");
+    const fixed = titled((await svc.getReview(run.id)).items, failed.title);
+    expect(fixed.createError).toBeNull();
+    expect(fixed.jiraKey).toBe(created.key);
+    expect((await getRun(db, run.id)).status).toBe("done");
+  });
+
+  it("allows route and update on an unlinked item while creating, but refuses structural edits", async () => {
+    const { user, fake, svc, run } = await reviewedRun();
+    const story = titled((await svc.getReview(run.id)).items, "Checkout: save a card");
+    fake.failNext.set(story.id, "boom");
+    await svc.createTickets(user.id, run.id);
+
+    await edit(svc, run.id, { type: "update", id: story.id, patch: { title: "Checkout: save a card (v2)" } });
+    expect(titled((await svc.getReview(run.id)).items, "Checkout: save a card (v2)").id).toBe(story.id);
+
+    await expect(edit(svc, run.id, { type: "delete", id: story.id })).rejects.toBeInstanceOf(RunStateError);
+    await expect(edit(svc, run.id, { type: "suggestion", id: story.id, status: "rejected" })).rejects.toBeInstanceOf(
+      RunStateError,
+    );
+  });
+
+  it("rejects a second edit that was made from the same draft version", async () => {
+    const { svc, run } = await reviewedRun();
+    const { draftVersion, items } = await svc.getReview(run.id);
+    const story = items.find((i) => i.kind === "story")!;
+
+    await svc.editDraft(run.id, { type: "update", id: story.id, patch: { title: "Tab A" } }, draftVersion);
+    await expect(
+      svc.editDraft(run.id, { type: "update", id: story.id, patch: { title: "Tab B" } }, draftVersion),
+    ).rejects.toBeInstanceOf(RunStateError);
+
+    expect(titled((await svc.getReview(run.id)).items, "Tab A").id).toBe(story.id);
   });
 });

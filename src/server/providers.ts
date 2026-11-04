@@ -133,8 +133,17 @@ export async function resolveProviderConfig(db: Db, project: Project): Promise<P
   return (await resolve(db, project)).config;
 }
 
+/** The host of a base URL. A value that does not parse is shown as it is, so a bad setting cannot break the review page. */
+function hostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
+  }
+}
+
 /** What the UI shows about the provider in use. It never includes the key. */
 export async function describeProvider(db: Db, project: Project): Promise<ProviderDescription> {
   const { source, name, config } = await resolve(db, project);
-  return { source, name, model: config.model, baseUrlHost: new URL(config.baseUrl).host };
+  return { source, name, model: config.model, baseUrlHost: hostOf(config.baseUrl) };
 }

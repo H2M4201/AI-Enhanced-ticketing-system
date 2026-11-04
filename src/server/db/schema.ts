@@ -102,6 +102,10 @@ export const runs = pgTable("runs", {
   roster: jsonb("roster"),
   assignableUsers: jsonb("assignable_users").$type<AssignableUser[]>(),
   clarificationsWritten: boolean("clarifications_written").notNull().default(false),
+  /** Set while a ticket creation holds the run. A stale value (older than the lock timeout) no longer counts. */
+  creatingSince: timestamp("creating_since", { withTimezone: true }),
+  /** Bumped on every draft write. Edits must present the version they were made from. */
+  draftVersion: integer("draft_version").notNull().default(0),
   lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
   createdAt: createdAt(),

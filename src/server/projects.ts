@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@/server/db/client";
-import { projectFiles, projects } from "@/server/db/schema";
-import { NotFoundError } from "@/server/errors";
+import { providerProfiles, projectFiles, projects } from "@/server/db/schema";
+import { ForbiddenError, NotFoundError } from "@/server/errors";
 
 export type Project = typeof projects.$inferSelect;
 export type ProjectFile = typeof projectFiles.$inferSelect;
@@ -31,7 +31,23 @@ export async function listProjectsForSites(db: Db, cloudIds: string[]): Promise<
   return db.select().from(projects).where(inArray(projects.cloudId, cloudIds));
 }
 
-export async function setProjectProvider(db: Db, projectId: string, profileId: string | null): Promise<void> {
+/** Links a provider profile to a project, or unlinks it with null. Only the profile's owner may link it. */
+export async function setProjectProvider(
+  db: Db,
+  projectId: string,
+  profileId: string | null,
+  actingUserId: string,
+): Promise<void> {
+  if (profileId !== null) {
+    const [profile] = await db
+      .select({ ownerUserId: providerProfiles.ownerUserId })
+      .from(providerProfiles)
+      .where(eq(providerProfiles.id, profileId));
+    if (!profile) throw new NotFoundError("Provider profile");
+    if (profile.ownerUserId !== actingUserId) {
+      throw new ForbiddenError("You can only use a provider profile you own");
+    }
+  }
   await db.update(projects).set({ providerProfileId: profileId }).where(eq(projects.id, projectId));
 }
 
