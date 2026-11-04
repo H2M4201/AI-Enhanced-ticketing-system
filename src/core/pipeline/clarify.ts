@@ -7,7 +7,7 @@ import {
 } from "@/core/domain";
 import type { LlmClient } from "@/core/llm/client";
 import { escapeAttribute, escapeTagBody } from "@/core/llm/escape";
-import { renderPrompt } from "@/core/llm/prompts";
+import { renderPromptMessages } from "@/core/llm/prompts";
 import { generateValidated } from "@/core/llm/structured";
 
 export type PipelineInputs = {
@@ -62,7 +62,7 @@ function knownRefs(documents: ParsedDocument[]): Set<string> {
  * and given ids Q1..Qn.
  */
 export async function generateQuestions(llm: LlmClient, inputs: PipelineInputs): Promise<ClarifyingQuestion[]> {
-  const prompt = renderPrompt("clarify", {
+  const messages = renderPromptMessages("clarify", {
     epic: `<epic>\n${escapeTagBody(inputs.epicText, "epic")}\n</epic>`,
     documents: formatDocuments(inputs.documents),
     guidelines: formatGuidelines(inputs.guidelines),
@@ -71,7 +71,7 @@ export async function generateQuestions(llm: LlmClient, inputs: PipelineInputs):
   const reply = await generateValidated(
     llm,
     QuestionReplySchema,
-    [{ role: "system", content: prompt }],
+    messages,
     { step: "clarify" },
   );
 

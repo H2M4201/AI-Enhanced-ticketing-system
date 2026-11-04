@@ -22,6 +22,7 @@ Rules:
 Reply with only one JSON object, with no prose and no code fence, in this shape:
 {"epic": {"title": string, "description": string}, "stories": [{"tempId": string, "title": string, "description": string, "acceptanceCriteria": string[], "estimate": number | null, "sourceRefs": string[], "origin": "from_docs" | "ai_suggestion", "assumptionQuestionIds": string[], "shapedBy": string[], "tasks": [{"title": string, "description": string, "acceptanceCriteria": string[], "sourceRefs": string[], "origin": "from_docs" | "ai_suggestion", "assumptionQuestionIds": string[], "shapedBy": string[]}]}]}
 
+---DATA---
 Epic:
 {{epic}}
 

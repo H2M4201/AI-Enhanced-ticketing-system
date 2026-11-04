@@ -18,6 +18,7 @@ Rules:
 Reply with only one JSON object, with no prose and no code fence, in this shape:
 {"questions": [{"category": "contradiction" | "ambiguity" | "missing", "text": string, "sourceRefs": string[], "rank": number}]}
 
+---DATA---
 Epic:
 {{epic}}
 

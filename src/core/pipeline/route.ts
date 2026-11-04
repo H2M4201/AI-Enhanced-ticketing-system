@@ -2,7 +2,7 @@ import { z } from "zod";
 import { type DraftItem, type Routing, type RosterRule } from "@/core/domain";
 import type { LlmClient } from "@/core/llm/client";
 import { escapeAttribute, escapeTagBody } from "@/core/llm/escape";
-import { renderPrompt } from "@/core/llm/prompts";
+import { renderPromptMessages } from "@/core/llm/prompts";
 import { generateValidated } from "@/core/llm/structured";
 import { normalizeName, type ResolvedRoster } from "@/core/pipeline/roster";
 import type { AssignableUser, ProjectMeta } from "@/core/ticketing/adapter";
@@ -29,9 +29,9 @@ function isRoutable(item: DraftItem): boolean {
   return (item.kind === "story" || item.kind === "task") && item.routing?.overridden !== true;
 }
 
-/** Escapes text for the item and rule blocks, so it cannot close either wrapper tag. */
+/** Escapes text for the item and rule blocks, so it cannot close the wrapper tags or its own item. */
 function escapeBlockText(text: string): string {
-  return escapeTagBody(escapeTagBody(text, "items"), "rules");
+  return escapeTagBody(escapeTagBody(escapeTagBody(text, "item"), "items"), "rules");
 }
 
 function formatItems(targets: DraftItem[], all: DraftItem[]): string {
@@ -137,14 +137,14 @@ export async function routeItems(
   const targets = items.filter(isRoutable);
   if (targets.length === 0) return items;
 
-  const prompt = renderPrompt("route", {
+  const messages = renderPromptMessages("route", {
     items: formatItems(targets, items),
     rules: formatRules(roster.rules),
   });
   const reply = await generateValidated(
     llm,
     RouteReplySchema,
-    [{ role: "system", content: prompt }],
+    messages,
     { step: "route" },
   );
 

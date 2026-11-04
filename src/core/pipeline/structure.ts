@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { StructurePlan } from "@/core/domain";
 import type { LlmClient } from "@/core/llm/client";
 import { escapeAttribute, escapeTagBody } from "@/core/llm/escape";
-import { renderPrompt } from "@/core/llm/prompts";
+import { renderPromptMessages } from "@/core/llm/prompts";
 import { generateValidated } from "@/core/llm/structured";
 import type { IssueTypeMeta, ProjectMeta } from "@/core/ticketing/adapter";
 
@@ -60,12 +60,12 @@ export async function extractStructure(
   const block = guidelines
     .map((g) => `<guideline file="${escapeAttribute(g.filename)}">\n${escapeTagBody(g.content, "guideline")}\n</guideline>`)
     .join("\n\n");
-  const prompt = renderPrompt("structure", { guidelines: block });
+  const messages = renderPromptMessages("structure", { guidelines: block });
 
   const reply = await generateValidated(
     llm,
     ExtractionReplySchema,
-    [{ role: "system", content: prompt }],
+    messages,
     { step: "structure" },
   );
   if (!reply.specified) return fallbackPlan();

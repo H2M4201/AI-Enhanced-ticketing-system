@@ -2,7 +2,7 @@ import { z } from "zod";
 import { type Roster, type RosterRule } from "@/core/domain";
 import type { LlmClient } from "@/core/llm/client";
 import { escapeAttribute, escapeTagBody } from "@/core/llm/escape";
-import { renderPrompt } from "@/core/llm/prompts";
+import { renderPromptMessages } from "@/core/llm/prompts";
 import { generateValidated } from "@/core/llm/structured";
 import type { AssignableUser } from "@/core/ticketing/adapter";
 
@@ -81,12 +81,12 @@ export async function parseRoster(
   const lines = routingFile.content.split(/\r?\n/);
   const numbered = lines.map((line, i) => `${i + 1}| ${line}`).join("\n");
   const block = `<routing file="${escapeAttribute(routingFile.filename)}">\n${escapeTagBody(numbered, "routing")}\n</routing>`;
-  const prompt = renderPrompt("roster", { routing: block });
+  const messages = renderPromptMessages("roster", { routing: block });
 
   const reply = await generateValidated(
     llm,
     RosterReplySchema,
-    [{ role: "system", content: prompt }],
+    messages,
     { step: "roster" },
   );
 

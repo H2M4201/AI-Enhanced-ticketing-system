@@ -19,5 +19,6 @@ Reply with only one JSON object, with no prose and no code fence, in this shape:
 
 Omit any role field you cannot fill. "specified" is always present.
 
+---DATA---
 Guidelines:
 {{guidelines}}

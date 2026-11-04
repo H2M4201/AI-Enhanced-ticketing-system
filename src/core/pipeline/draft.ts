@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { ClarifyingQuestion, DraftItem, ItemKind, Resolution } from "@/core/domain";
 import type { LlmClient } from "@/core/llm/client";
 import { escapeTagBody } from "@/core/llm/escape";
-import { renderPrompt } from "@/core/llm/prompts";
+import { renderPromptMessages } from "@/core/llm/prompts";
 import { generateValidated } from "@/core/llm/structured";
 import { type PipelineInputs, formatClarifications, formatDocuments, formatGuidelines } from "@/core/pipeline/clarify";
 import type { ResolvedStructure } from "@/core/pipeline/structure";
@@ -169,7 +169,7 @@ export async function generateDraft(
   },
 ): Promise<DraftItem[]> {
   const { inputs, questions, resolutions, structure } = args;
-  const prompt = renderPrompt("draft", {
+  const messages = renderPromptMessages("draft", {
     epic: `<epic>\n${escapeTagBody(inputs.epicText, "epic")}\n</epic>`,
     documents: formatDocuments(inputs.documents),
     guidelines: formatGuidelines(inputs.guidelines),
@@ -181,7 +181,7 @@ export async function generateDraft(
   const reply = await generateValidated(
     llm,
     DraftOutputSchema,
-    [{ role: "system", content: prompt }],
+    messages,
     { step: "draft" },
   );
 

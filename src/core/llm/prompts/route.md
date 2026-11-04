@@ -13,6 +13,7 @@ Rules:
 Reply with only one JSON object, with no prose and no code fence, in this shape:
 {"assignments": [{"itemId": string, "ruleId": string | null, "reason": string}]}
 
+---DATA---
 Items:
 {{items}}
 

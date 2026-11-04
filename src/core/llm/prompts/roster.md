@@ -18,5 +18,6 @@ Rules:
 Reply with only one JSON object, with no prose and no code fence, in this shape:
 {"teams": [{"name": string, "defaultPerson": string, "members": string[]}], "people": [{"name": string, "role": string | null}], "rules": [{"condition": string, "target": {"type": "person" | "team", "name": string}, "line": number, "quote": string}]}
 
+---DATA---
 Routing file:
 {{routing}}
