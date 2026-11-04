@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { type Roster, type RosterRule } from "@/core/domain";
 import type { LlmClient } from "@/core/llm/client";
+import { escapeAttribute, escapeTagBody } from "@/core/llm/escape";
 import { renderPrompt } from "@/core/llm/prompts";
 import { generateValidated } from "@/core/llm/structured";
 import type { AssignableUser } from "@/core/ticketing/adapter";
@@ -50,19 +51,10 @@ function tokensOf(normalized: string): string[] {
   return normalized === "" ? [] : normalized.split(" ");
 }
 
-/** The email local part, with dots, underscores, pluses and hyphens read as spaces ("minh.nguyen" is "minh nguyen"). */
+/** The normalized email local part, kept literally (so "minh.nguyen@..." gives "minh.nguyen"). */
 function emailLocalName(email: string | null): string | null {
   if (!email) return null;
-  return normalizeName((email.split("@")[0] ?? "").replace(/[._+-]+/g, " "));
-}
-
-/** Keeps routing text from closing its own tag or breaking the file attribute. */
-function escapeBody(content: string): string {
-  return content.replace(/<\/routing/gi, "&lt;/routing");
-}
-
-function escapeAttribute(value: string): string {
-  return value.replace(/["<>]/g, (c) => ({ '"': "&quot;", "<": "&lt;", ">": "&gt;" })[c] ?? c);
+  return normalizeName(email.split("@")[0] ?? "");
 }
 
 const stripWhitespace = (s: string): string => s.replace(/\s+/g, "");
@@ -88,7 +80,7 @@ export async function parseRoster(
 ): Promise<Roster> {
   const lines = routingFile.content.split(/\r?\n/);
   const numbered = lines.map((line, i) => `${i + 1}| ${line}`).join("\n");
-  const block = `<routing file="${escapeAttribute(routingFile.filename)}">\n${escapeBody(numbered)}\n</routing>`;
+  const block = `<routing file="${escapeAttribute(routingFile.filename)}">\n${escapeTagBody(numbered, "routing")}\n</routing>`;
   const prompt = renderPrompt("roster", { routing: block });
 
   const reply = await generateValidated(

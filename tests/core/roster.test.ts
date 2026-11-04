@@ -151,3 +151,49 @@ describe("parseRoster", () => {
     ]);
   });
 });
+
+describe("resolveRoster matching rules", () => {
+  it("two users with the same exact display name are ambiguous", () => {
+    const twins: AssignableUser[] = [
+      { accountId: "acc-1", displayName: "Lan Anh", email: "lan.a@example.com" },
+      { accountId: "acc-2", displayName: "Lan Anh", email: "lan.b@example.com" },
+    ];
+    const r = resolveRoster(rosterWith(["Lan Anh"]), twins);
+    expect(r.accounts).toEqual({});
+    expect(r.unresolved).toEqual([
+      {
+        name: "Lan Anh",
+        reason: "ambiguous",
+        suggestions: [expect.objectContaining({ accountId: "acc-1" }), expect.objectContaining({ accountId: "acc-2" })],
+      },
+    ]);
+  });
+
+  it("resolves an email local part such as minh.nguyen when it is unique", () => {
+    const r = resolveRoster(rosterWith(["minh.nguyen"]), users);
+    expect(r.accounts[normalizeName("minh.nguyen")]).toEqual(
+      expect.objectContaining({ displayName: "Minh Nguyen" }),
+    );
+    expect(r.unresolved).toEqual([]);
+  });
+
+  it("returns at most 3 shared-token suggestions", () => {
+    const crowd: AssignableUser[] = ["An Van Hoang", "Tran Van Bo", "Le Van Cuong", "Pham Van Dong", "Vo Van Em"].map(
+      (displayName, i) => ({ accountId: `acc-${i}`, displayName, email: null }),
+    );
+    const r = resolveRoster(rosterWith(["Nguyen Van Tu"]), crowd);
+    expect(r.unresolved).toHaveLength(1);
+    expect(r.unresolved[0].reason).toBe("not_found");
+    expect(r.unresolved[0].suggestions).toHaveLength(3);
+  });
+
+  it("reports a name appearing in several places once in unresolved", () => {
+    const roster: Roster = {
+      teams: [{ name: "Ops", defaultPerson: "Ghost Person", members: ["Ghost Person"] }],
+      people: [{ name: "Ghost Person", role: null }],
+      rules: [{ id: "R1", condition: "x", target: { type: "person", name: "Ghost Person" }, line: 1, quote: "q" }],
+    };
+    const r = resolveRoster(roster, users);
+    expect(r.unresolved).toEqual([{ name: "Ghost Person", reason: "not_found", suggestions: [] }]);
+  });
+});

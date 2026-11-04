@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { StructurePlan } from "@/core/domain";
 import type { LlmClient } from "@/core/llm/client";
+import { escapeAttribute, escapeTagBody } from "@/core/llm/escape";
 import { renderPrompt } from "@/core/llm/prompts";
 import { generateValidated } from "@/core/llm/structured";
 import type { IssueTypeMeta, ProjectMeta } from "@/core/ticketing/adapter";
@@ -46,15 +47,6 @@ function clean(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-/** Keeps guideline text from closing its own tag or breaking the file attribute. */
-function escapeBody(content: string): string {
-  return content.replace(/<\/guideline/gi, "&lt;/guideline");
-}
-
-function escapeAttribute(value: string): string {
-  return value.replace(/["<>]/g, (c) => ({ '"': "&quot;", "<": "&lt;", ">": "&gt;" })[c] ?? c);
-}
-
 /**
  * Asks the model which issue types the guidelines use for the epic, story and task roles.
  * Guidelines that say nothing about structure give the fallback plan.
@@ -66,7 +58,7 @@ export async function extractStructure(
   if (guidelines.length === 0) return fallbackPlan();
 
   const block = guidelines
-    .map((g) => `<guideline file="${escapeAttribute(g.filename)}">\n${escapeBody(g.content)}\n</guideline>`)
+    .map((g) => `<guideline file="${escapeAttribute(g.filename)}">\n${escapeTagBody(g.content, "guideline")}\n</guideline>`)
     .join("\n\n");
   const prompt = renderPrompt("structure", { guidelines: block });
 
