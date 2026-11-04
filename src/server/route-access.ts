@@ -1,15 +1,29 @@
 /** Shared lookups for route handlers: load the resource, check the caller may use it, and build the services. */
+import { z } from "zod";
 import { JiraCloudAdapter } from "@/integrations/jira/adapter";
 import { JiraHttp } from "@/integrations/jira/client";
 import { assertOwner, assertProjectAccess } from "@/server/access";
 import { getSites } from "@/server/auth/atlassian";
 import { getValidAccessToken, type User } from "@/server/auth/tokens";
 import type { Db } from "@/server/db/client";
-import { ForbiddenError } from "@/server/errors";
+import { ForbiddenError, NotFoundError } from "@/server/errors";
 import { runDeps } from "@/server/deps";
 import { getProject, type Project } from "@/server/projects";
 import { getRun, type Run } from "@/server/runs/repo";
 import { RunService } from "@/server/runs/service";
+
+/** Ids in the path are uuids. Anything else cannot name a row, so it is reported as not found, not as a server error. */
+export function assertUuid(value: string, what: string): void {
+  if (!z.uuid().safeParse(value).success) throw new NotFoundError(what);
+}
+
+/** Whether a database error is a unique-key violation (Postgres code 23505), possibly wrapped by the driver. */
+export function isUniqueViolation(error: unknown): boolean {
+  for (let e: unknown = error; e && typeof e === "object"; e = (e as { cause?: unknown }).cause) {
+    if ((e as { code?: unknown }).code === "23505") return true;
+  }
+  return false;
+}
 
 /** The database for this request. */
 export async function database(): Promise<Db> {
@@ -18,6 +32,7 @@ export async function database(): Promise<Db> {
 
 /** The database and the project, after checking the user can browse the project in Jira. */
 export async function projectFor(projectId: string, user: User): Promise<{ db: Db; project: Project }> {
+  assertUuid(projectId, "Project");
   const { db } = await runDeps();
   const project = await getProject(db, projectId);
   await assertProjectAccess(db, user.id, project);
@@ -26,6 +41,7 @@ export async function projectFor(projectId: string, user: User): Promise<{ db: D
 
 /** Like projectFor, but only the project's owner passes. */
 export async function ownedProjectFor(projectId: string, user: User): Promise<{ db: Db; project: Project }> {
+  assertUuid(projectId, "Project");
   const { db } = await runDeps();
   const project = await getProject(db, projectId);
   assertOwner(user, project);
@@ -34,6 +50,7 @@ export async function ownedProjectFor(projectId: string, user: User): Promise<{ 
 
 /** A run with its project's access checked, plus a RunService for this request. */
 export async function runFor(runId: string, user: User): Promise<{ service: RunService; run: Run; project: Project }> {
+  assertUuid(runId, "Run");
   const deps = await runDeps();
   const run = await getRun(deps.db, runId);
   const project = await getProject(deps.db, run.projectId);

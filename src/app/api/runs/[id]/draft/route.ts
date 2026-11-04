@@ -36,8 +36,8 @@ export async function POST(_request: Request, { params }: Params) {
 export async function PATCH(request: Request, { params }: Params) {
   return handle(async () => {
     const user = await requireUser();
-    const input = await readJson(request, EditDraftSchema);
     const { service, run } = await runFor((await params).id, user);
+    const input = await readJson(request, EditDraftSchema);
     await service.editDraft(run.id, input.op, input.expectedVersion);
     return service.getReview(run.id);
   }, "runs.draft.edit");

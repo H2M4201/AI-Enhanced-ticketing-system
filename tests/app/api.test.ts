@@ -13,21 +13,30 @@ import { runDeps } from "@/server/deps";
 import { handle } from "@/server/http";
 import { ForbiddenError, NotFoundError, ReauthRequiredError, RunStateError } from "@/server/errors";
 import { users } from "@/server/db/schema";
-import { createProject } from "@/server/projects";
-import { insertRun } from "@/server/runs/repo";
+import { createProfile } from "@/server/providers";
+import { createProject, findProjectByKey, uploadProjectFile } from "@/server/projects";
+import { insertDocument, insertRun, replaceQuestions } from "@/server/runs/repo";
 import { testDb } from "../helpers/db";
 import type { Db } from "@/server/db/client";
 
 import { GET as getRunDetail } from "@/app/api/runs/[id]/route";
 import { POST as postChecks } from "@/app/api/runs/[id]/checks/route";
 import { PATCH as patchDraft } from "@/app/api/runs/[id]/draft/route";
+import { DELETE as deleteDocument } from "@/app/api/runs/[id]/documents/[docId]/route";
+import { PUT as putQuestion } from "@/app/api/runs/[id]/questions/[qid]/route";
 import { POST as postProjectFile } from "@/app/api/projects/[id]/files/route";
+import { DELETE as deleteProjectFile } from "@/app/api/projects/[id]/files/[fileId]/route";
 import { PATCH as patchProject, GET as getProject } from "@/app/api/projects/[id]/route";
+import { GET as listProjects, POST as createProjectRoute } from "@/app/api/projects/route";
+import { GET as listProviders } from "@/app/api/providers/route";
 
 vi.mock("@/server/auth/session", () => ({ requireUser: vi.fn() }));
 vi.mock("@/server/deps", () => ({ runDeps: vi.fn() }));
-
-const NOW = new Date("2026-11-04T10:00:00Z");
+// The real function, but a spy, so one test can simulate losing a race on the duplicate check.
+vi.mock("@/server/projects", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/projects")>();
+  return { ...actual, findProjectByKey: vi.fn(actual.findProjectByKey) };
+});
 
 const unused = async (): Promise<never> => {
   throw new Error("not used in this test");
@@ -122,75 +131,90 @@ describe("handle", () => {
     expect(logged).toContain('"step":"api"');
     expect(logged).not.toContain("secret epic text");
   });
+
+  it("maps ForbiddenError to 403", async () => {
+    const { status } = await errorOf(async () => {
+      throw new ForbiddenError("nope");
+    });
+    expect(status).toBe(403);
+  });
 });
 
-describe("route handlers", () => {
-  // One in-memory database for the file: each setup adds rows with unique ids instead of a new database.
-  let db: Db;
-  beforeAll(async () => {
-    db = await testDb();
+// One in-memory database for the file: each setup adds rows with unique ids instead of a new database.
+let db: Db;
+beforeAll(async () => {
+  db = await testDb();
+});
+
+async function newUser(name: string) {
+  const [row] = await db
+    .insert(users)
+    .values({
+      atlassianAccountId: `${name.toLowerCase()}-${randomUUID()}`,
+      displayName: name,
+      email: null,
+      accessTokenEnc: encryptSecret("access"),
+      refreshTokenEnc: encryptSecret("refresh"),
+      accessTokenExpiresAt: new Date(Date.now() + 3600_000),
+    })
+    .returning();
+  return row;
+}
+
+/** An owner, another user, and a project owned by the owner. The browse check passes for every project. */
+async function setup() {
+  const owner = await newUser("Owner");
+  const other = await newUser("Other");
+  const project = await createProject(db, owner.id, {
+    name: "Payments",
+    cloudId: `cloud-${randomUUID()}`,
+    siteUrl: "https://one.atlassian.net",
+    jiraProjectKey: "PAY",
   });
+  vi.spyOn(JiraCloudAdapter.prototype, "canBrowseProject").mockResolvedValue(true);
+  vi.mocked(runDeps).mockResolvedValue({
+    db,
+    llmFor: unused,
+    adapterFor: unused,
+    contextTokensFor: unused,
+  });
+  vi.mocked(requireUser).mockResolvedValue(owner);
+  return { owner, other, project };
+}
 
-  async function setup() {
-    const [owner] = await db
-      .insert(users)
-      .values({
-        atlassianAccountId: `owner-${randomUUID()}`,
-        displayName: "Owner",
-        email: null,
-        accessTokenEnc: encryptSecret("access"),
-        refreshTokenEnc: encryptSecret("refresh"),
-        accessTokenExpiresAt: new Date(NOW.getTime() + 3600_000),
-      })
-      .returning();
-    const [other] = await db
-      .insert(users)
-      .values({
-        atlassianAccountId: `other-${randomUUID()}`,
-        displayName: "Other",
-        email: null,
-        accessTokenEnc: encryptSecret("access"),
-        refreshTokenEnc: encryptSecret("refresh"),
-        accessTokenExpiresAt: new Date(NOW.getTime() + 3600_000),
-      })
-      .returning();
-    const project = await createProject(db, owner.id, {
-      name: "Payments",
-      cloudId: `cloud-${randomUUID()}`,
-      siteUrl: "https://one.atlassian.net",
-      jiraProjectKey: "PAY",
-    });
-    vi.spyOn(JiraCloudAdapter.prototype, "canBrowseProject").mockResolvedValue(true);
-    vi.mocked(runDeps).mockResolvedValue({
-      db,
-      llmFor: unused,
-      adapterFor: unused,
-      contextTokensFor: unused,
-    });
-    vi.mocked(requireUser).mockResolvedValue(owner);
-    return { db, owner, other, project };
-  }
+/** Atlassian's accessible-resources answer for the signed-in user. */
+function stubSites(sites: { id: string; name: string; url: string }[]) {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input).endsWith("/oauth/token/accessible-resources")) return Response.json(sites);
+    throw new Error(`unexpected fetch ${String(input)}`);
+  });
+}
 
-  const ctx = <T extends Record<string, string>>(params: T) => ({ params: Promise.resolve(params) });
+const ctx = <T extends Record<string, string>>(params: T) => ({ params: Promise.resolve(params) });
 
-  function jsonRequest(method: string, body: unknown): Request {
-    return new Request("http://localhost/api", {
-      method,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
+function jsonRequest(method: string, body: unknown): Request {
+  return new Request("http://localhost/api", {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
 
+async function reviewRun(projectId: string, createdBy: string) {
+  return insertRun(db, {
+    projectId,
+    createdBy,
+    epicText: "Epic text",
+    existingEpicKey: null,
+    fileVersions: [],
+    status: "review",
+  });
+}
+
+describe("route handlers", () => {
   it("returns 409 run_state when checks are run on a run that is already under review", async () => {
-    const { db, owner, project } = await setup();
-    const run = await insertRun(db, {
-      projectId: project.id,
-      createdBy: owner.id,
-      epicText: "Epic text",
-      existingEpicKey: null,
-      fileVersions: [],
-      status: "review",
-    });
+    const { owner, project } = await setup();
+    const run = await reviewRun(project.id, owner.id);
 
     const response = await postChecks(new Request("http://localhost/api/checks", { method: "POST" }), ctx({ id: run.id }));
     const body = await response.json();
@@ -211,7 +235,136 @@ describe("route handlers", () => {
     expect((await response.json()).error.code).toBe("not_found");
   });
 
-  it("returns 413 too_large for a project file over 200 KB, before its bytes are read", async () => {
+  it("returns 404 not_found, not 500, for an id that is not a uuid", async () => {
+    await setup();
+    const response = await getRunDetail(new Request("http://localhost/api/runs/abc"), ctx({ id: "abc" }));
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.code).toBe("not_found");
+  });
+
+  it("returns 404 for a project id that is not a uuid", async () => {
+    await setup();
+    const response = await getProject(new Request("http://localhost/api/projects/abc"), ctx({ id: "abc" }));
+    expect(response.status).toBe(404);
+  });
+
+  it("returns 404 for a file id that is not a uuid", async () => {
+    const { project } = await setup();
+    const response = await deleteProjectFile(
+      new Request("http://localhost/api/projects/x/files/abc", { method: "DELETE" }),
+      ctx({ id: project.id, fileId: "abc" }),
+    );
+    expect(response.status).toBe(404);
+  });
+
+  it("returns 403 for a run when the user cannot browse the project in Jira", async () => {
+    const { owner, project } = await setup();
+    const run = await reviewRun(project.id, owner.id);
+    vi.mocked(JiraCloudAdapter.prototype.canBrowseProject).mockResolvedValue(false);
+
+    const response = await getRunDetail(new Request("http://localhost/api/runs/x"), ctx({ id: run.id }));
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe("forbidden");
+  });
+
+  it("returns 404 when a document of another run is deleted through this run", async () => {
+    const { owner, project } = await setup();
+    const runA = await insertRun(db, { projectId: project.id, createdBy: owner.id, epicText: "A", existingEpicKey: null, fileVersions: [], status: "inputs" });
+    const runB = await insertRun(db, { projectId: project.id, createdBy: owner.id, epicText: "B", existingEpicKey: null, fileVersions: [], status: "inputs" });
+    const doc = await insertDocument(db, { runId: runB.id, filename: "notes.txt", kind: "txt", sections: [], charCount: 0 });
+
+    const response = await deleteDocument(
+      new Request("http://localhost/api/runs/x/documents/y", { method: "DELETE" }),
+      ctx({ id: runA.id, docId: doc.id }),
+    );
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.code).toBe("not_found");
+  });
+
+  it("returns 404 when a question of another run is answered through this run", async () => {
+    const { owner, project } = await setup();
+    const runA = await insertRun(db, {
+      projectId: project.id,
+      createdBy: owner.id,
+      epicText: "Epic text",
+      existingEpicKey: null,
+      fileVersions: [],
+      status: "questions",
+    });
+    const runB = await insertRun(db, {
+      projectId: project.id,
+      createdBy: owner.id,
+      epicText: "Epic text",
+      existingEpicKey: null,
+      fileVersions: [],
+      status: "questions",
+    });
+    await replaceQuestions(db, runB.id, [
+      { id: "Q1", category: "missing", text: "Who pays shipping?", sourceRefs: [], rank: 1 },
+    ]);
+
+    const response = await putQuestion(
+      jsonRequest("PUT", { kind: "out_of_scope" }),
+      ctx({ id: runA.id, qid: "Q1" }),
+    );
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.code).toBe("not_found");
+  });
+
+  it("returns 404 when a file of another project is deleted through this project", async () => {
+    const { owner, project } = await setup();
+    const otherProject = await createProject(db, owner.id, {
+      name: "Checkout",
+      cloudId: `cloud-${randomUUID()}`,
+      siteUrl: "https://two.atlassian.net",
+      jiraProjectKey: "CHK",
+    });
+    const file = await uploadProjectFile(db, otherProject.id, owner.id, "guideline", "g.md", "Some guideline");
+
+    const response = await deleteProjectFile(
+      new Request("http://localhost/api/projects/x/files/y", { method: "DELETE" }),
+      ctx({ id: project.id, fileId: file.id }),
+    );
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.code).toBe("not_found");
+  });
+
+  it("returns 403 before reading the body when a non-owner patches a project", async () => {
+    const { other, project } = await setup();
+    vi.mocked(requireUser).mockResolvedValue(other);
+
+    // The body is invalid, so a 400 here would mean the body was parsed before the owner check.
+    const response = await patchProject(jsonRequest("PATCH", { retentionDays: "not a number" }), ctx({ id: project.id }));
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe("forbidden");
+  });
+
+  it("returns 403 before reading the body when the user cannot browse the run's project", async () => {
+    const { owner, project } = await setup();
+    const run = await reviewRun(project.id, owner.id);
+    vi.mocked(JiraCloudAdapter.prototype.canBrowseProject).mockResolvedValue(false);
+
+    const response = await patchDraft(
+      jsonRequest("PATCH", { op: { type: "explode" }, expectedVersion: "x" }),
+      ctx({ id: run.id }),
+    );
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe("forbidden");
+  });
+
+  it("returns 400 for a draft edit whose op is not a known DraftOp", async () => {
+    const { owner, project } = await setup();
+    const run = await reviewRun(project.id, owner.id);
+
+    const response = await patchDraft(
+      jsonRequest("PATCH", { op: { type: "explode", id: "x" }, expectedVersion: 0 }),
+      ctx({ id: run.id }),
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("invalid_request");
+  });
+
+  it("returns 413 too_large for a project file over 200 KB", async () => {
     const { project } = await setup();
     const form = new FormData();
     form.set("kind", "guideline");
@@ -239,34 +392,6 @@ describe("route handlers", () => {
     expect((await response.json()).error.code).toBe("unsupported_type");
   });
 
-  it("returns 400 for a draft edit whose op is not a known DraftOp", async () => {
-    const { db, owner, project } = await setup();
-    const run = await insertRun(db, {
-      projectId: project.id,
-      createdBy: owner.id,
-      epicText: "Epic text",
-      existingEpicKey: null,
-      fileVersions: [],
-      status: "review",
-    });
-
-    const response = await patchDraft(
-      jsonRequest("PATCH", { op: { type: "explode", id: "x" }, expectedVersion: 0 }),
-      ctx({ id: run.id }),
-    );
-    expect(response.status).toBe(400);
-    expect((await response.json()).error.code).toBe("invalid_request");
-  });
-
-  it("returns 403 when a non-owner tries to change a project", async () => {
-    const { other, project } = await setup();
-    vi.mocked(requireUser).mockResolvedValue(other);
-
-    const response = await patchProject(jsonRequest("PATCH", { retentionDays: 14 }), ctx({ id: project.id }));
-    expect(response.status).toBe(403);
-    expect((await response.json()).error.code).toBe("forbidden");
-  });
-
   it("returns the project to a member who can browse it in Jira", async () => {
     const { project } = await setup();
     const response = await getProject(new Request("http://localhost/api/projects/x"), ctx({ id: project.id }));
@@ -277,11 +402,110 @@ describe("route handlers", () => {
   });
 });
 
-describe("ForbiddenError mapping", () => {
-  it("maps ForbiddenError to 403", async () => {
-    const { status } = await errorOf(async () => {
-      throw new ForbiddenError("nope");
+describe("GET /api/projects", () => {
+  it("lists a project the user can browse and leaves out one whose check fails", async () => {
+    const { other, project } = await setup();
+    const owner = await newUser("Viewer owner");
+    const broken = await createProject(db, owner.id, {
+      name: "Broken",
+      cloudId: project.cloudId,
+      siteUrl: project.siteUrl,
+      jiraProjectKey: "BAD",
     });
-    expect(status).toBe(403);
+    expect(broken.cloudId).toBe(project.cloudId);
+    stubSites([{ id: project.cloudId, name: "One", url: project.siteUrl }]);
+    vi.mocked(requireUser).mockResolvedValue(other);
+    vi.mocked(JiraCloudAdapter.prototype.canBrowseProject).mockImplementation(async (key: string) => {
+      if (key === "BAD") throw new JiraError(500, ["boom"]);
+      return key === "PAY";
+    });
+
+    const response = await listProjects();
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.projects.map((p: { jiraProjectKey: string }) => p.jiraProjectKey)).toEqual(["PAY"]);
+    expect(body.projects[0]).toMatchObject({ id: project.id, owned: false });
+  });
+
+  it("returns 401 reauth_required when the Atlassian grant has been revoked", async () => {
+    const { other, project } = await setup();
+    stubSites([{ id: project.cloudId, name: "One", url: project.siteUrl }]);
+    vi.mocked(requireUser).mockResolvedValue(other);
+    vi.mocked(JiraCloudAdapter.prototype.canBrowseProject).mockRejectedValue(new ReauthRequiredError());
+
+    const response = await listProjects();
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe("reauth_required");
+  });
+});
+
+describe("POST /api/projects", () => {
+  it("returns 403 when the user cannot browse the Jira project", async () => {
+    const { project } = await setup();
+    stubSites([{ id: project.cloudId, name: "One", url: project.siteUrl }]);
+    vi.mocked(JiraCloudAdapter.prototype.canBrowseProject).mockResolvedValue(false);
+
+    const response = await createProjectRoute(
+      jsonRequest("POST", { cloudId: project.cloudId, jiraProjectKey: "NEW", name: "New" }),
+    );
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe("forbidden");
+  });
+
+  it("returns 409 project_exists when the project is already set up", async () => {
+    const { project } = await setup();
+    stubSites([{ id: project.cloudId, name: "One", url: project.siteUrl }]);
+
+    const response = await createProjectRoute(
+      jsonRequest("POST", { cloudId: project.cloudId, jiraProjectKey: "pay", name: "Again" }),
+    );
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.code).toBe("project_exists");
+  });
+
+  it("maps a unique-key violation on insert to the same 409 when the check passed first", async () => {
+    const { project } = await setup();
+    stubSites([{ id: project.cloudId, name: "One", url: project.siteUrl }]);
+    // The duplicate check reports no project, as if a concurrent create had not committed yet.
+    vi.mocked(findProjectByKey).mockResolvedValueOnce(null);
+
+    const response = await createProjectRoute(
+      jsonRequest("POST", { cloudId: project.cloudId, jiraProjectKey: "PAY", name: "Race" }),
+    );
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.code).toBe("project_exists");
+  });
+});
+
+describe("GET /api/providers", () => {
+  it("returns only the caller's profiles, with the key masked and never in the response", async () => {
+    const { owner, other } = await setup();
+    const ownKey = "sk-owner-SECRET-1111";
+    const otherKey = "sk-other-SECRET-2222";
+    await createProfile(db, owner.id, {
+      name: "Owner profile",
+      baseUrl: "https://llm.example.com/v1",
+      apiKey: ownKey,
+      model: "m",
+      supportsJsonMode: true,
+      contextTokens: 128000,
+    });
+    await createProfile(db, other.id, {
+      name: "Other profile",
+      baseUrl: "https://llm.example.com/v1",
+      apiKey: otherKey,
+      model: "m",
+      supportsJsonMode: true,
+      contextTokens: 128000,
+    });
+
+    const response = await listProviders();
+    const text = await response.text();
+    const body = JSON.parse(text);
+    expect(body.providers.map((p: { name: string }) => p.name)).toEqual(["Owner profile"]);
+    expect(body.providers[0].apiKeyMasked.endsWith("1111")).toBe(true);
+    expect(text).not.toContain(ownKey);
+    expect(text).not.toContain(otherKey);
+    expect(text).not.toContain("SECRET");
   });
 });

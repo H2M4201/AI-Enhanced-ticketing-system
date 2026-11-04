@@ -4,7 +4,7 @@ import { requireUser } from "@/server/auth/session";
 import { ForbiddenError, ReauthRequiredError } from "@/server/errors";
 import { HttpError, handle, readJson } from "@/server/http";
 import { createProject, findProjectByKey, listOwnedProjects, listProjectsForSites, type Project } from "@/server/projects";
-import { database, jiraFor, projectView, siteFor, sitesFor } from "@/server/route-access";
+import { database, isUniqueViolation, jiraFor, projectView, siteFor, sitesFor } from "@/server/route-access";
 import type { Db } from "@/server/db/client";
 
 export const runtime = "nodejs";
@@ -69,12 +69,18 @@ export async function POST(request: Request) {
       throw new HttpError(409, "project_exists", `${key} is already set up`);
     }
 
-    const project = await createProject(db, user.id, {
-      name: input.name,
-      cloudId: input.cloudId,
-      siteUrl: site.url,
-      jiraProjectKey: key,
-    });
-    return projectView(project, true);
+    try {
+      const project = await createProject(db, user.id, {
+        name: input.name,
+        cloudId: input.cloudId,
+        siteUrl: site.url,
+        jiraProjectKey: key,
+      });
+      return projectView(project, true);
+    } catch (error) {
+      // A concurrent create can pass the check above and then hit the unique key. It gets the same answer.
+      if (isUniqueViolation(error)) throw new HttpError(409, "project_exists", `${key} is already set up`);
+      throw error;
+    }
   }, "projects.create");
 }

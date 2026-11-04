@@ -1,7 +1,7 @@
 import { requireUser } from "@/server/auth/session";
 import { handle } from "@/server/http";
 import { getProjectFile, removeProjectFile } from "@/server/projects";
-import { ownedProjectFor } from "@/server/route-access";
+import { assertUuid, ownedProjectFor } from "@/server/route-access";
 
 export const runtime = "nodejs";
 
@@ -11,6 +11,7 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
     const user = await requireUser();
     const { id, fileId } = await params;
     const { db, project } = await ownedProjectFor(id, user);
+    assertUuid(fileId, "File");
     await getProjectFile(db, project.id, fileId);
     await removeProjectFile(db, fileId);
     return { ok: true };

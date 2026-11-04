@@ -25,8 +25,8 @@ export async function GET(_request: Request, { params }: Params) {
 export async function PATCH(request: Request, { params }: Params) {
   return handle(async () => {
     const user = await requireUser();
-    const input = await readJson(request, PatchProjectSchema);
     const { db, project } = await ownedProjectFor((await params).id, user);
+    const input = await readJson(request, PatchProjectSchema);
     if (input.providerProfileId !== undefined) {
       await setProjectProvider(db, project.id, input.providerProfileId, user.id);
     }
