@@ -29,3 +29,19 @@ export class NotFoundError extends Error {
     this.name = "NotFoundError";
   }
 }
+
+/** There is no signed-in user for this request. */
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("Sign in is required");
+    this.name = "UnauthorizedError";
+  }
+}
+
+/** The Atlassian grant was revoked or expired, so the user must sign in again. */
+export class ReauthRequiredError extends Error {
+  constructor() {
+    super("Your Atlassian session has ended. Sign in again.");
+    this.name = "ReauthRequiredError";
+  }
+}

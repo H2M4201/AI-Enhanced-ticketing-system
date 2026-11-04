@@ -40,13 +40,31 @@ function openPersistentPglite(): PGlite {
   return new PGlite(PGLITE_DIR);
 }
 
-let dbPromise: Promise<Db> | undefined;
+type GlobalWithDb = typeof globalThis & { __ebcDb?: Promise<Db> };
 
-/** Process-wide database singleton, configured from `DATABASE_URL`. */
+/** In production the singleton lives in the module. Elsewhere it lives on globalThis so dev hot reload reuses it. */
+let productionDb: Promise<Db> | undefined;
+
+function readSingleton(): Promise<Db> | undefined {
+  return process.env.NODE_ENV === "production" ? productionDb : (globalThis as GlobalWithDb).__ebcDb;
+}
+
+function writeSingleton(promise: Promise<Db> | undefined): void {
+  if (process.env.NODE_ENV === "production") productionDb = promise;
+  else (globalThis as GlobalWithDb).__ebcDb = promise;
+}
+
+/**
+ * Process-wide database singleton, configured from `DATABASE_URL`.
+ * PGlite locks its directory, so a second open during dev hot reload would fail; hence globalThis.
+ */
 export function getDb(): Promise<Db> {
-  dbPromise ??= createDb(getEnv().DATABASE_URL).catch((error: unknown) => {
-    dbPromise = undefined;
+  const existing = readSingleton();
+  if (existing) return existing;
+  const promise = createDb(getEnv().DATABASE_URL).catch((error: unknown) => {
+    writeSingleton(undefined);
     throw error;
   });
-  return dbPromise;
+  writeSingleton(promise);
+  return promise;
 }
