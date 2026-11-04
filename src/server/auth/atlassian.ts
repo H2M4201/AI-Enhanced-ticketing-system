@@ -12,7 +12,6 @@ const RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resource
 
 export type TokenSet = { accessToken: string; refreshToken: string; expiresAt: Date };
 
-/** Atlassian answered with a non-success status. The message carries no response text. */
 /** Atlassian answered successfully but the body is missing something we need. */
 export class AtlassianResponseError extends Error {
   constructor(message: string) {
